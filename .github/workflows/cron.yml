@@ -6,6 +6,10 @@ on:
     - cron: '*/15 * * * *'
   workflow_dispatch: # ボタンを押して手動でいつでもテスト起動できる機能
 
+# 💡【重要】ここにこの1行を追加して、Node.js 24を強制適用します
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
@@ -40,12 +44,11 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python amazon_notifier.py
 
-      # 5. 【罠対策】新着・発送履歴のデータベース(db)を次回のために保存して終了する
+      # 5. 新着・発送履歴のデータベース(db)を次回のために保存して終了する
       - name: Save Database Changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # データベースファイルが存在する場合のみ保存処理を行う
           if [ -f amazon_orders.db ]; then
             git add amazon_orders.db
             git commit -m "Update order history database [skip ci]" || exit 0
