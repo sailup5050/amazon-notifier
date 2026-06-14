@@ -2,9 +2,8 @@ name: Amazon Daily Monitor Cron
 
 on:
   schedule:
-    # 🕒 15分ごとに自動起動させる設定（UTC時間基準）
     - cron: '*/15 * * * *'
-  workflow_dispatch: # ボタンを押して手動でいつでもテスト起動できる機能
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
@@ -17,23 +16,21 @@ jobs:
       contents: write
 
     steps:
-      # 1. サーバーにあなたのプログラムを配置
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # 2. Python環境のセットアップ
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 3. 必要なパーツ（requests）のインストール
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
-      # 4. 隠しボックスから鍵を取り出して、Pythonを実行
       - name: Run Python Script
         env:
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
@@ -42,17 +39,16 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python amazon_notifier.py
 
-      # 5. 【修正ポイント】すれ違いを防止してデータベースを確実に保存する
       - name: Save Database Changes
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
+          
+          # 💡 履歴のすれ違いを強制的に直す（最強コマンド）
+          git pull origin main --rebase --autostash
+          
           if [ -f amazon_orders.db ]; then
             git add amazon_orders.db
             git commit -m "Update order history database [skip ci]" || exit 0
-            
-            # 💡 ここ！プッシュする前にリモートの最新状態を引っ張ってきて合体させます
-            git pull --rebase origin main
-            
             git push origin main
           fi
