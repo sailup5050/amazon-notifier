@@ -19,9 +19,9 @@ jobs:
       - name: Restore Database Cache
         uses: actions/cache/restore@v4
         with:
-          # 💡 絶対パスに変更（確実に見つけます）
           path: ${{ github.workspace }}/amazon_orders.db
-          key: amazon-db-${{ github.run_id }}
+          # 💡 何回目のテストかを見分ける番号(-${{ github.run_attempt }})を追加
+          key: amazon-db-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             amazon-db-
 
@@ -46,8 +46,8 @@ jobs:
       - name: Save Database Cache
         uses: actions/cache/save@v4
         if: always()
-        # 💡 万が一キャッシュサーバーが混んでいてもエラーで止めない魔法の1行
         continue-on-error: true
         with:
           path: ${{ github.workspace }}/amazon_orders.db
-          key: amazon-db-${{ github.run_id }}
+          # 💡 ここにも追加
+          key: amazon-db-${{ github.run_id }}-${{ github.run_attempt }}
