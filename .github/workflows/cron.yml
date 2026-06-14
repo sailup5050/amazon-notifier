@@ -44,7 +44,7 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           
-          # 💡 履歴のすれ違いを強制的に直す（最強コマンド）
+          # 💡 これがすれ違いを直す魔法のコマンドです（前回はこれが保存されていませんでした）
           git pull origin main --rebase --autostash
           
           if [ -f amazon_orders.db ]; then
