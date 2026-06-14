@@ -6,7 +6,6 @@ import json
 import sqlite3
 import requests
 
-# 💡 コードの上のほう（設定欄）をこのように書き換えます
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 🛠️ 【自動運用設定】GitHubの暗箱（環境変数）から安全に鍵を読み込みます
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -15,8 +14,10 @@ CLIENT_ID             = os.environ.get("CLIENT_ID")
 CLIENT_SECRET         = os.environ.get("CLIENT_SECRET")
 DISCORD_WEBHOOK       = os.environ.get("DISCORD_WEBHOOK")
 
-# 🕒 過去48時間の注文一覧、閲覧数を通知する間隔
+# 🕒 過去48時間の注文一覧を「何時間ごと」に通知するか（初期値: 2時間ごと）
 ORDER_INTERVAL_HOURS   = 2
+
+# 🕒 閲覧数トップ5を「何時間ごと」に通知するか（初期値: 24時間ごと）
 TRAFFIC_INTERVAL_HOURS = 24
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -76,28 +77,29 @@ def get_order_items(order_id, token):
         return response.json().get("payload", {}).get("OrderItems", [])
     return []
 
-def get_product_title_web(asin):
-    """【新機能】Amazonの商品ページから直接商品名を安全に取得する"""
+def get_product_title_api(asin, token):
+    """【改善機能】Amazon公式のカタログAPIを使って、ASINから正確な商品名を取得する"""
     try:
-        url = f"https://www.amazon.co.jp/dp/{asin}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
+        url = f"https://sellingpartnerapi-fe.amazon.com/catalog/2022-04-01/items/{asin}"
+        headers = {"x-amz-access-token": token}
+        params = {
+            "marketplaceIds": MARKETPLACE_ID_JP,
+            "includedData": "summaries"  # 商品名（Title）が含まれる要約データを要求
         }
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, params=params)
         if res.status_code == 200:
-            html = res.text
-            if "<title>" in html and "</title>" in html:
-                title = html.split("<title>")[1].split("</title>")[0]
-                # 不要な文字を削って綺麗にする
-                title = title.replace("Amazon.co.jp:", "").replace("Amazon |", "").strip()
-                # Discordで見やすいように長すぎるタイトルは省略する
-                if len(title) > 50:
-                    title = title[:50] + "..."
+            summaries = res.json().get("summaries", [])
+            if summaries:
+                title = summaries[0].get("itemName", "商品名が未設定です")
+                # Discordで見やすいように長すぎるタイトルは省略
+                if len(title) > 60:
+                    title = title[:60] + "..."
                 return title
+        else:
+            print(f"カタログAPIエラー(ASIN: {asin}): {res.text}")
     except Exception as e:
-        print(f"商品名(Web)の取得に失敗(ASIN: {asin}): {e}")
-    return "商品名を取得できませんでした"
+        print(f"カタログAPI接続失敗(ASIN: {asin}): {e}")
+    return "商品名を取得できませんでした（権限未反映の可能性あり）"
 
 def check_new_and_shipped_orders(token):
     three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -307,15 +309,13 @@ def check_and_send_traffic_report(token):
         sorted_items = sorted(asin_data, key=lambda x: x.get("trafficByAsin", {}).get("pageViews", 0), reverse=True)
         top5_message = "📈 **【Amazon】直近の閲覧数トップ5商品**\n━━━━━━━━━━━━━━━━━━━\n"
         
-        # 💡 上位5個の商品名をWebから取得してメッセージを構築
         for index, item in enumerate(sorted_items[:5], 1):
             asin = item.get("asin")
             views = item.get("trafficByAsin", {}).get("pageViews", 0)
             sessions = item.get("trafficByAsin", {}).get("sessions", 0)
             
-            # Webからタイトルを引っ張る
-            product_title = get_product_title_web(asin)
-            time.sleep(1) # Amazonにロボット判定されないための1秒お休み
+            # 💡 Webからのスクレイピングをやめ、公式APIから商品名を取得するように変更
+            product_title = get_product_title_api(asin, token)
             
             top5_message += (
                 f"🥇第{index}位\n"
@@ -344,17 +344,15 @@ def send_discord(text):
     except Exception as e:
         print(f"Discord送信エラー: {e}")
 
-# 💡 コードの「一番最後（最下部）」をこのように書き換えます
 if __name__ == "__main__":
     try:
         init_db()
         token = get_access_token()
+        
         check_new_and_shipped_orders(token)
         check_and_send_order_summary(token)
         check_and_send_traffic_report(token)
+        
         print("🎉 すべての処理が正常に終了しました。")
     except Exception as e:
         print(f"❌ エラーが発生しました: {e}")
-        
-    # ⚠️ input() 命令は自動サーバーでフリーズ原因になるため、完全に消去またはコメントアウトします
-    # input("\n画面を一時停止しています...")
