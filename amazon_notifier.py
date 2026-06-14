@@ -14,10 +14,10 @@ CLIENT_ID             = os.environ.get("CLIENT_ID")
 CLIENT_SECRET         = os.environ.get("CLIENT_SECRET")
 DISCORD_WEBHOOK       = os.environ.get("DISCORD_WEBHOOK")
 
-# 🕒 過去48時間の注文一覧を「何時間ごと」に通知するか（初期値: 2時間ごと）
+# 🕒 過去48時間の注文一覧を「何時間ごと」に通知するか
 ORDER_INTERVAL_HOURS   = 2
 
-# 🕒 閲覧数トップ5を「何時間ごと」に通知するか（初期値: 24時間ごと）
+# 🕒 閲覧数トップ5を「何時間ごと」に通知するか
 TRAFFIC_INTERVAL_HOURS = 24
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -78,20 +78,19 @@ def get_order_items(order_id, token):
     return []
 
 def get_product_title_api(asin, token):
-    """【改善機能】Amazon公式のカタログAPIを使って、ASINから正確な商品名を取得する"""
+    """Amazon公式のカタログAPIを使って、ASINから正確な商品名を取得する"""
     try:
         url = f"https://sellingpartnerapi-fe.amazon.com/catalog/2022-04-01/items/{asin}"
         headers = {"x-amz-access-token": token}
         params = {
             "marketplaceIds": MARKETPLACE_ID_JP,
-            "includedData": "summaries"  # 商品名（Title）が含まれる要約データを要求
+            "includedData": "summaries"
         }
         res = requests.get(url, headers=headers, params=params)
         if res.status_code == 200:
             summaries = res.json().get("summaries", [])
             if summaries:
                 title = summaries[0].get("itemName", "商品名が未設定です")
-                # Discordで見やすいように長すぎるタイトルは省略
                 if len(title) > 60:
                     title = title[:60] + "..."
                 return title
@@ -99,7 +98,7 @@ def get_product_title_api(asin, token):
             print(f"カタログAPIエラー(ASIN: {asin}): {res.text}")
     except Exception as e:
         print(f"カタログAPI接続失敗(ASIN: {asin}): {e}")
-    return "商品名を取得できませんでした（権限未反映の可能性あり）"
+    return "商品名を取得できませんでした"
 
 def check_new_and_shipped_orders(token):
     three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -180,7 +179,7 @@ def check_and_send_order_summary(token):
     row = cursor.fetchone()
     
     now = datetime.datetime.now()
-    if row is not None and now - datetime.datetime.fromisoformat(row[0]) < datetime.timedelta(hours=ORDER_INTERVAL_HOURS):
+    if row is not None and now - datetime.datetime.fromisoformat(row[0]) < datetime.timedelta(hours=ORDER_INTERVAL_HOHours):
         print("🕒 注文一覧の通知時間ではないためスキップします。")
         conn.close()
         return
@@ -314,7 +313,7 @@ def check_and_send_traffic_report(token):
             views = item.get("trafficByAsin", {}).get("pageViews", 0)
             sessions = item.get("trafficByAsin", {}).get("sessions", 0)
             
-            # 💡 Webからのスクレイピングをやめ、公式APIから商品名を取得するように変更
+            # 💡 最新の公式カタログAPIから商品名を取得
             product_title = get_product_title_api(asin, token)
             
             top5_message += (
