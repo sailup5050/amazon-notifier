@@ -12,25 +12,33 @@ jobs:
   run-monitor:
     runs-on: ubuntu-latest
     
-    permissions:
-      contents: write
-
     steps:
+      # 1. あなたのプログラム（コード）をサーバーに配置
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
+      # 2. 【新機軸】前回保存したデータベースをキャッシュ（一時記憶）から復元
+      - name: Restore Database Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: amazon_orders.db
+          key: amazon-db-${{ github.run_id }}-${{ github.run_number }}
+          restore-keys: |
+            amazon-db-
+
+      # 3. Python環境のセットアップ
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # 4. 必要なパーツ（requests）のインストール
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
+      # 5. 隠しボックスから鍵を取り出して、Pythonを実行
       - name: Run Python Script
         env:
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
@@ -39,16 +47,10 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python amazon_notifier.py
 
-      - name: Save Database Changes
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          
-          # 💡 履歴のすれ違いを事前に直すコマンド
-          git pull origin main --rebase || echo "No changes to pull"
-          
-          if [ -f amazon_orders.db ]; then
-            git add amazon_orders.db
-            git commit -m "Update order history database [skip ci]" || exit 0
-            git push origin main
-          fi
+      # 6. 【新機軸】今回の最新データベースを次回のためにキャッシュに保存
+      - name: Save Database Cache
+        uses: actions/cache/save@v4
+        if: always() # プログラムが途中で止まっても、ここまでのデータを極力保存する
+        with:
+          path: amazon_orders.db
+          key: amazon-db-${{ github.run_id }}-${{ github.run_number }}
