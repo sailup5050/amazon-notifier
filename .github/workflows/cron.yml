@@ -13,32 +13,28 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      # 1. あなたのプログラム（コード）をサーバーに配置
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 【新機軸】前回保存したデータベースをキャッシュ（一時記憶）から復元
       - name: Restore Database Cache
         uses: actions/cache/restore@v4
         with:
-          path: amazon_orders.db
-          key: amazon-db-${{ github.run_id }}-${{ github.run_number }}
+          # 💡 絶対パスに変更（確実に見つけます）
+          path: ${{ github.workspace }}/amazon_orders.db
+          key: amazon-db-${{ github.run_id }}
           restore-keys: |
             amazon-db-
 
-      # 3. Python環境のセットアップ
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 4. 必要なパーツ（requests）のインストール
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
-      # 5. 隠しボックスから鍵を取り出して、Pythonを実行
       - name: Run Python Script
         env:
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
@@ -47,10 +43,11 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python amazon_notifier.py
 
-      # 6. 【新機軸】今回の最新データベースを次回のためにキャッシュに保存
       - name: Save Database Cache
         uses: actions/cache/save@v4
-        if: always() # プログラムが途中で止まっても、ここまでのデータを極力保存する
+        if: always()
+        # 💡 万が一キャッシュサーバーが混んでいてもエラーで止めない魔法の1行
+        continue-on-error: true
         with:
-          path: amazon_orders.db
-          key: amazon-db-${{ github.run_id }}-${{ github.run_number }}
+          path: ${{ github.workspace }}/amazon_orders.db
+          key: amazon-db-${{ github.run_id }}
