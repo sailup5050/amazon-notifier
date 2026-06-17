@@ -1,8 +1,6 @@
 import os
 import datetime
 import time
-import gzip
-import json
 import sqlite3
 import requests
 
@@ -16,9 +14,6 @@ DISCORD_WEBHOOK       = os.environ.get("DISCORD_WEBHOOK")
 
 # 🕒 過去48時間の注文一覧を「何時間ごと」に通知するか
 ORDER_INTERVAL_HOURS   = 2
-
-# 🕒 閲覧数トップ5を「何時間ごと」に通知するか
-TRAFFIC_INTERVAL_HOURS = 24
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 MARKETPLACE_ID_JP = "A1VC38T7YXB528"
@@ -77,36 +72,12 @@ def get_order_items(order_id, token):
         return response.json().get("payload", {}).get("OrderItems", [])
     return []
 
-def get_product_title_api(asin, token):
-    """Amazon公式のカタログAPIを使って、ASINから正確な商品名を取得する"""
-    try:
-        url = f"https://sellingpartnerapi-fe.amazon.com/catalog/2022-04-01/items/{asin}"
-        headers = {"x-amz-access-token": token}
-        params = {
-            "marketplaceIds": MARKETPLACE_ID_JP,
-            "includedData": "summaries"
-        }
-        res = requests.get(url, headers=headers, params=params)
-        if res.status_code == 200:
-            summaries = res.json().get("summaries", [])
-            if summaries:
-                title = summaries[0].get("itemName", "商品名が未設定です")
-                if len(title) > 60:
-                    title = title[:60] + "..."
-                return title
-        else:
-            print(f"カタログAPIエラー(ASIN: {asin}): {res.text}")
-    except Exception as e:
-        print(f"カタログAPI接続失敗(ASIN: {asin}): {e}")
-    return "商品名を取得できませんでした"
-
 def check_new_and_shipped_orders(token):
     three_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).strftime('%Y-%m-%dT%H:%M:%SZ')
     print(f"🔄 新着・発送状況をスキャン中...")
     
     url = "https://sellingpartnerapi-fe.amazon.com/orders/v0/orders"
     headers = {"x-amz-access-token": token}
-    # 💡 取得対象ステータスに "Pending" を追加しました
     params = {
         "MarketplaceIds": MARKETPLACE_ID_JP,
         "CreatedAfter": three_days_ago,
@@ -134,7 +105,6 @@ def check_new_and_shipped_orders(token):
         
         if row is None:
             items = get_order_items(order_id, token)
-            # 💡 保留中の注文だった場合はタイトルに分かりやすくラベルを付与します
             status_label = "【保留中】" if current_status == "Pending" else ""
             
             for item in items:
@@ -173,7 +143,6 @@ def check_new_and_shipped_orders(token):
                     send_discord(msg)
                 cursor.execute("UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?", (current_status, datetime.datetime.now().isoformat(), order_id))
             elif past_status != current_status:
-                # 💡 Pending -> Unshipped など、内部ステータスが動いた場合もデータベースを追従させます
                 cursor.execute("UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?", (current_status, datetime.datetime.now().isoformat(), order_id))
     
     conn.commit()
@@ -196,7 +165,6 @@ def check_and_send_order_summary(token):
     
     url = "https://sellingpartnerapi-fe.amazon.com/orders/v0/orders"
     headers = {"x-amz-access-token": token}
-    # 💡 48時間レポートの対象にも "Pending" を追加
     params = {
         "MarketplaceIds": MARKETPLACE_ID_JP,
         "CreatedAfter": forty_eight_hours_ago,
@@ -218,7 +186,6 @@ def check_and_send_order_summary(token):
             order_id = order.get('AmazonOrderId')
             status = order.get('OrderStatus')
             
-            # 💡 レポート表示用の日本語変換ロジックに「保留中」を追加
             if status == "Pending":
                 status_ja = "保留中"
             elif status in ["Unshipped", "PartiallyShipped"]:
@@ -246,108 +213,6 @@ def check_and_send_order_summary(token):
     conn.close()
     print("✅ 過去48時間の一覧通知完了。")
 
-def check_and_send_traffic_report(token):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM config WHERE key = 'last_traffic_summary_time'")
-    row = cursor.fetchone()
-    
-    now = datetime.datetime.now()
-    if row is not None and now - datetime.datetime.fromisoformat(row[0]) < datetime.timedelta(hours=TRAFFIC_INTERVAL_HOURS):
-        print("🕒 閲覧数レポートの通知時間ではないためスキップします。")
-        conn.close()
-        return
-        
-    print("📊 閲覧数（トラフィック）レポートを生成リクエスト中...")
-    start_time = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)).strftime('%Y-%m-%dT00:00:00Z')
-    end_time = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)).strftime('%Y-%m-%dT23:59:59Z')
-    
-    url = "https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/reports"
-    headers = {"x-amz-access-token": token, "Content-Type": "application/json"}
-    body = {
-        "reportType": "GET_SALES_AND_TRAFFIC_REPORT",
-        "marketplaceIds": [MARKETPLACE_ID_JP],
-        "dataStartTime": start_time,
-        "dataEndTime": end_time
-    }
-    
-    res = requests.post(url, headers=headers, json=body)
-    if res.status_code != 202:
-        print(f"❌ レポート要求に失敗: {res.text}")
-        conn.close()
-        return
-        
-    report_id = res.json().get("reportId")
-    print("⏳ Amazonが集計中（約20秒待機）...")
-    
-    report_doc_id = None
-    for _ in range(6):
-        time.sleep(10)
-        check_url = f"https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/reports/{report_id}"
-        check_res = requests.get(check_url, headers=headers)
-        if check_res.json().get("processingStatus") == "DONE":
-            report_doc_id = check_res.json().get("reportDocumentId")
-            break
-            
-    if not report_doc_id:
-        print("❌ レポート生成タイムアウト")
-        conn.close()
-        return
-        
-    doc_url = f"https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/documents/{report_doc_id}"
-    doc_res = requests.get(doc_url, headers=headers)
-    doc_data = doc_res.json()
-    
-    download_url = doc_data.get("url")
-    compression = doc_data.get("compressionAlgorithm")
-    
-    download_res = requests.get(download_url)
-    raw_content = download_res.content
-    
-    if compression == "GZIP":
-        try:
-            raw_content = gzip.decompress(raw_content)
-            print("📦 Amazonの圧縮データを正常に解凍しました。")
-        except Exception as gzip_err:
-            print(f"⚠️ 解凍処理で警告が発生しました: {gzip_err}")
-
-    try:
-        report_data = json.loads(raw_content.decode('utf-8'))
-    except Exception as parse_err:
-        print(f"❌ JSONパースエラーが発生しました: {parse_err}")
-        conn.close()
-        return
-        
-    asin_data = report_data.get("salesAndTrafficByAsin", [])
-    
-    if asin_data:
-        sorted_items = sorted(asin_data, key=lambda x: x.get("trafficByAsin", {}).get("pageViews", 0), reverse=True)
-        top5_message = "📈 **【Amazon】直近の閲覧数トップ5商品**\n━━━━━━━━━━━━━━━━━━━\n"
-        
-        for index, item in enumerate(sorted_items[:5], 1):
-            asin = item.get("asin")
-            views = item.get("trafficByAsin", {}).get("pageViews", 0)
-            sessions = item.get("trafficByAsin", {}).get("sessions", 0)
-            
-            product_title = get_product_title_api(asin, token)
-            
-            top5_message += (
-                f"🥇第{index}位\n"
-                f"📦 商品名: {product_title}\n"
-                f"🔗 ASIN: {asin} (https://www.amazon.co.jp/dp/{asin})\n"
-                f"👀 閲覧数(PV): {views}回 / 訪問者数: {sessions}人\n"
-                f"-----------------------------------\n"
-            )
-        top5_message += "━━━━━━━━━━━━━━━━━━━"
-        send_discord(top5_message)
-    else:
-        print("閲覧数データが空でした。")
-        
-    cursor.execute("INSERT OR REPLACE INTO config VALUES ('last_traffic_summary_time', ?)", (now.isoformat(),))
-    conn.commit()
-    conn.close()
-    print("✅ 閲覧数トップ5の通知完了。")
-
 def send_discord(text):
     try:
         if len(text) > 2000:
@@ -363,9 +228,9 @@ if __name__ == "__main__":
         init_db()
         token = get_access_token()
         
+        # 注文のチェックと2時間おきのサマリーのみ実行（閲覧数は完全削除）
         check_new_and_shipped_orders(token)
         check_and_send_order_summary(token)
-        check_and_send_traffic_report(token)
         
         print("🎉 すべての処理が正常に終了しました。")
     except Exception as e:
