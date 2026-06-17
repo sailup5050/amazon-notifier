@@ -97,7 +97,11 @@ def check_new_and_shipped_orders(token):
     for order in orders:
         order_id = order.get('AmazonOrderId')
         current_status = order.get('OrderStatus')
-        total_price = order.get('OrderTotal', {}).get('Amount', '0')
+        
+        # 💡 【新着通知用】保留中の場合は「確認中」、それ以外は「￥金額」にします
+        amount = order.get('OrderTotal', {}).get('Amount')
+        total_price = "確認中（保留注文）" if current_status == "Pending" or not amount else f"￥{amount}"
+        
         purchase_date_jst = format_to_jst(order.get('PurchaseDate'))
         
         cursor.execute("SELECT status FROM orders WHERE order_id = ?", (order_id,))
@@ -105,133 +109,4 @@ def check_new_and_shipped_orders(token):
         
         if row is None:
             items = get_order_items(order_id, token)
-            status_label = "【保留中】" if current_status == "Pending" else ""
-            
-            for item in items:
-                title = item.get('Title', '商品名取得不可')
-                qty = item.get('QuantityOrdered', 1)
-                
-                msg = (
-                    f"🎉 **【Amazon】✨新着注文が入りました！{status_label}**\n"
-                    f"━━━━━━━━━━━━━━━━━━━\n"
-                    f"📅 注文日時: {purchase_date_jst} (日本時間)\n"
-                    f"📦 商品名: {title}\n"
-                    f"🔢 数量: {qty}\n"
-                    f"💰 金額: ￥{total_price}\n"
-                    f"🆔 注文ID: {order_id}\n"
-                    f"━━━━━━━━━━━━━━━━━━━"
-                )
-                send_discord(msg)
-            cursor.execute("INSERT INTO orders VALUES (?, ?, ?)", (order_id, current_status, datetime.datetime.now().isoformat()))
-            
-        else:
-            past_status = row[0]
-            if past_status != "Shipped" and current_status == "Shipped":
-                items = get_order_items(order_id, token)
-                for item in items:
-                    title = item.get('Title', '商品名取得不可')
-                    
-                    msg = (
-                        f"🚚 **【Amazon】📦商品が発送されました！**\n"
-                        f"━━━━━━━━━━━━━━━━━━━\n"
-                        f"📅 注文日時: {purchase_date_jst} (日本時間)\n"
-                        f"📦 商品名: {title}\n"
-                        f"🆔 注文ID: {order_id}\n"
-                        f"✨ ステータス: Amazon側で出荷完了を確認しました\n"
-                        f"━━━━━━━━━━━━━━━━━━━"
-                    )
-                    send_discord(msg)
-                cursor.execute("UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?", (current_status, datetime.datetime.now().isoformat(), order_id))
-            elif past_status != current_status:
-                cursor.execute("UPDATE orders SET status = ?, updated_at = ? WHERE order_id = ?", (current_status, datetime.datetime.now().isoformat(), order_id))
-    
-    conn.commit()
-    conn.close()
-
-def check_and_send_order_summary(token):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM config WHERE key = 'last_order_summary_time'")
-    row = cursor.fetchone()
-    
-    now = datetime.datetime.now()
-    if row is not None and now - datetime.datetime.fromisoformat(row[0]) < datetime.timedelta(hours=ORDER_INTERVAL_HOURS):
-        print("🕒 注文一覧の通知時間ではないためスキップします。")
-        conn.close()
-        return
-        
-    print("📋 過去48時間の注文一覧を生成中...")
-    forty_eight_hours_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=48)).strftime('%Y-%m-%dT%H:%M:%SZ')
-    
-    url = "https://sellingpartnerapi-fe.amazon.com/orders/v0/orders"
-    headers = {"x-amz-access-token": token}
-    params = {
-        "MarketplaceIds": MARKETPLACE_ID_JP,
-        "CreatedAfter": forty_eight_hours_ago,
-        "OrderStatuses": "Pending,Unshipped,PartiallyShipped,Shipped"
-    }
-    
-    response = requests.get(url, headers=headers, params=params)
-    if response.status_code != 200:
-        print(f"❌ 一覧取得失敗: {response.text}")
-        conn.close()
-        return
-        
-    orders = response.json().get("payload", {}).get("Orders", [])
-    if not orders:
-        summary_message = "📋 **【Amazon】過去48時間以内に注文はありませんでした。**"
-    else:
-        summary_message = f"📋 **【Amazon】過去48時間の注文一覧（合計: {len(orders)} 件）**\n━━━━━━━━━━━━━━━━━━━\n"
-        for index, order in enumerate(orders, 1):
-            order_id = order.get('AmazonOrderId')
-            status = order.get('OrderStatus')
-            
-            if status == "Pending":
-                status_ja = "保留中"
-            elif status in ["Unshipped", "PartiallyShipped"]:
-                status_ja = "未出荷"
-            else:
-                status_ja = "発送済み"
-                
-            total_price = order.get('OrderTotal', {}).get('Amount', '0')
-            purchase_date_jst = format_to_jst(order.get('PurchaseDate'))
-            
-            items = get_order_items(order_id, token)
-            titles = [f"{item.get('Title', '不明')} (x{item.get('QuantityOrdered', 1)})" for item in items]
-            summary_message += (
-                f"🔹 {index}. 【{status_ja}】 ￥{total_price}\n"
-                f" ├ 注文日時: {purchase_date_jst}\n"
-                f" └ 商品: {' / '.join(titles)}\n"
-                f" └ ID: {order_id}\n"
-                f"-----------------------------------\n"
-            )
-        summary_message += "━━━━━━━━━━━━━━━━━━━"
-        
-    send_discord(summary_message)
-    cursor.execute("INSERT OR REPLACE INTO config VALUES ('last_order_summary_time', ?)", (now.isoformat(),))
-    conn.commit()
-    conn.close()
-    print("✅ 過去48時間の一覧通知完了。")
-
-def send_discord(text):
-    try:
-        if len(text) > 2000:
-            requests.post(DISCORD_WEBHOOK, json={"content": text[:1900] + "\n...(続く)"})
-            requests.post(DISCORD_WEBHOOK, json={"content": "続き:\n" + text[1900:]})
-        else:
-            requests.post(DISCORD_WEBHOOK, json={"content": text})
-    except Exception as e:
-        print(f"Discord送信エラー: {e}")
-
-if __name__ == "__main__":
-    try:
-        init_db()
-        token = get_access_token()
-        
-        # 注文のチェックと2時間おきのサマリーのみ実行（閲覧数は完全削除）
-        check_new_and_shipped_orders(token)
-        check_and_send_order_summary(token)
-        
-        print("🎉 すべての処理が正常に終了しました。")
-    except Exception as e:
-        print(f"❌ エラーが発生しました: {e}")
+            status_
