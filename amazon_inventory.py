@@ -68,7 +68,6 @@ def request_and_download_report(token, report_type, extra_body=None):
         if status == "DONE":
             report_doc_id = res_json.get("reportDocumentId")
             break
-        # 💡 【変更点】Amazonが拒否した理由（statusReason）をログに詳しく出力するようにしました
         elif status == "FATAL":
             reason = res_json.get("statusReason", "理由の詳細は返されませんでした")
             raise Exception(f"Amazon側でレポート[{report_type}]の生成が致命的エラーになりました。理由: {reason}")
@@ -91,8 +90,9 @@ def main():
         token = get_access_token()
         product_costs = get_spreadsheet_costs()
         
-        print("🔄 AmazonにFBA在庫レポートを要求中...")
-        inventory_tsv = request_and_download_report(token, "GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA")
+        # 💡 【変更点】よりエラーが起きにくい「GET_FBA_MYI_ALL_DATA」に変更しました
+        print("🔄 AmazonにFBA在庫レポート(全データ版)を要求中...")
+        inventory_tsv = request_and_download_report(token, "GET_FBA_MYI_ALL_DATA")
         
         print("🔄 直近30日間のPV・アクセスデータを取得中...")
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -201,7 +201,7 @@ def main():
             f"-----------------------------------\n"
             f"💰 **直近30日間の確定パフォーマンス**\n"
             f" ├ 🔢 確定販売個数: {total_sales_30d} 個\n"
-            f" ├ 💵 確定売高: ￥{int(total_revenue_30d):,}\n"
+            f" ├ 💵 確定売上高: ￥{int(total_revenue_30d):,}\n"
             f" └ ✨ 期間内確定粗利: ￥{int(total_profit_30d):,}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"※原価データはスプレッドシートの『原価設定』シートより自動計算しています。"
