@@ -93,7 +93,7 @@ def main():
         inventory_tsv = ""
         traffic_data = {}
         
-        # 1. FBA在庫レポートの取得（本来の正しい型番に戻します）
+        # 1. FBA在庫レポートの取得
         print("🔄 AmazonにFBA在庫レポートを要求中...")
         try:
             inventory_tsv = request_and_download_report(token, "GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA")
@@ -202,8 +202,7 @@ def main():
                         "sales_30d": units_sold, "revenue_30d": int(revenue), "profit_30d": int(profit_30d)
                     })
 
-        # 4-B. 【超強化】在庫レポートがエラーだった、あるいは在庫データに載っていないが、
-        #       直近30日間に「閲覧や売上」の動きがあった商品をビジネスレポートから自動で補完・救済します
+        # 4-B. 在庫レポートに載っていないが、動きのあった商品を補完
         for asin, t_data in traffic_map.items():
             if asin in processed_asins:
                 continue
@@ -215,7 +214,7 @@ def main():
             
             sku = "データなし (FBAエラー)" if not inventory_tsv else "出品中 (在庫0)"
             title = f"ASIN: {asin} (直近30日以内にアクセスまたは売上あり)"
-            qty = 0  # 在庫レポートがスキップされたため、一時的に0として処理
+            qty = 0
             price = 0.0
             
             if asin in product_costs:
@@ -245,20 +244,20 @@ def main():
         print("📢 独立したDiscordチャンネルへ総括サマリーを送信中...")
         report_date = datetime.datetime.now().strftime('%Y/%m/%d')
         
-        # 在庫レポートの状態によって通知文をスマートに切り替え
         if inventory_tsv:
             stock_status_str = (
                 f" ├ 種類数: {total_stock_items} 品目\n"
                 f" └ 総在庫数: {total_stock_qty} 個"
             )
         else:
-            stock_status_str = " ⚠️ Amazon在庫データ取得不可（売上高・PVのみを集計中）"
+            stock_status_str = " ⚠️ Amazon在庫データ取得不可（売上高·PVのみを集計中）"
         
+        # 🔗 【バグ修正】文字列の先頭にしっかりと f" を付与しました
         discord_msg = (
             f"📊 **【Amazon】店舗経営・在庫総括レポート ({report_date})**\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"📦 **現在のFBA在庫ステータス**\n"
-            {stock_status_str}\n"
+            f"{stock_status_str}\n"
             f"-----------------------------------\n"
             f"📈 **直近30日間のトラフィック (PV状況)**\n"
             f" ├ 👁️ 総ページ閲覧数(PV): {total_pv_30d:,} PV\n"
@@ -269,7 +268,7 @@ def main():
             f" ├ 💵 確定売上高: ￥{int(total_revenue_30d):,}\n"
             f" └ ✨ 期間内確定粗利: ￥{int(total_profit_30d):,}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"※PVおよび業績は【直近32日前〜2日前までの30日間】のデータを集計しています。"
+            f"※原価データはスプレッドシートの『原価設定』シートより自動計算しています。"
         )
         
         if DISCORD_WEBHOOK_SUMMARY:
