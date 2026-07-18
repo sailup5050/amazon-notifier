@@ -6,13 +6,9 @@ import datetime
 import requests
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 💰 【仕入れ値・原価設定ボックス】
+# 💡 改良版：仕入れ値はGoogleスプレッドシートから自動取得します！
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PRODUCT_COSTS = {
-    "B0XXXXXXXX": 1200, 
-    "B0YYYYYYYY": 2500,
-}
-DEFAULT_PROFIT_RATE = 0.4  # 原価未登録商品の利益率（40%）
+DEFAULT_PROFIT_RATE = 0.4  # スプレッドシートに登録がない商品の利益率（40%）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 REFRESH_TOKEN           = os.environ.get("REFRESH_TOKEN")
@@ -35,8 +31,20 @@ def get_access_token():
         return res.json().get("access_token")
     raise Exception("認証トークンの取得に失敗しました")
 
+def get_spreadsheet_costs():
+    """💡 スプレッドシートの『原価設定』シートからリアルタイムに原価マップを取得する"""
+    print("📋 スプレッドシートから仕入れ値データを読み込み中...")
+    try:
+        res = requests.get(INVENTORY_GAS_URL)
+        if res.status_code == 200:
+            costs = res.json()
+            print(f"✅ 仕入れ値データの読み込み成功 ({len(costs)}件の商品マスタ)")
+            return costs
+    except Exception as e:
+        print(f"⚠️ スプレッドシートからの仕入れ値取得に失敗したため、一律計算を行います: {e}")
+    return {}
+
 def request_and_download_report(token, report_type, extra_body=None):
-    """Amazon SP-APIから指定されたレポートを要求してダウンロードする共通関数"""
     url = "https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/reports"
     headers = {"x-amz-access-token": token, "Content-Type": "application/json"}
     
@@ -51,8 +59,9 @@ def request_and_download_report(token, report_type, extra_body=None):
     report_id = res.json().get("reportId")
     
     report_doc_id = None
-    for _ in range(12):  # 最大2分間待機
+    for i in range(30):
         time.sleep(10)
+        print(f"⏱️ Amazon側の集計完了を待っています... ({ (i+1)*10 }秒経過)")
         check_res = requests.get(f"{url}/{report_id}", headers=headers)
         status = check_res.json().get("processingStatus")
         if status == "DONE":
@@ -62,7 +71,7 @@ def request_and_download_report(token, report_type, extra_body=None):
             raise Exception(f"Amazon側でレポート[{report_type}]の生成が致命的エラーになりました")
             
     if not report_doc_id:
-        raise Exception(f"レポート[{report_type}]生成タイムアウト")
+        raise Exception(f"Amazon側のデータ作成が混雑のため制限時間（5分）を超過しました。少し時間を置いて再実行してください。")
         
     doc_res = requests.get(f"https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/documents/{report_doc_id}", headers=headers)
     doc_data = doc_res.json()
@@ -78,12 +87,14 @@ def main():
     try:
         token = get_access_token()
         
+        # 💡 スプレッドシートから最新の原価設定を取得
+        product_costs = get_spreadsheet_costs()
+        
         # 1. FBA在庫レポートの取得 (TSV)
-        print("🔄 FBA在庫データを取得中...")
+        print("🔄 AmazonにFBA在庫レポートを要求中...")
         inventory_tsv = request_and_download_report(token, "GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA")
         
         # 2. ビジネスレポート（PV・トラフィック）の取得 (JSON)
-        # Amazonのデータ集計ラグ(48時間)を考慮し、32日前〜2日前までの30日間を指定
         print("🔄 直近30日間のPV・アクセスデータを取得中...")
         now = datetime.datetime.now(datetime.timezone.utc)
         start_date = (now - datetime.timedelta(days=32)).strftime('%Y-%m-%dT00:00:00Z')
@@ -96,7 +107,7 @@ def main():
         )
         traffic_data = json.loads(traffic_json_str)
         
-        # 3. トラフィック・過去売上データをASINごとにマッピング辞書化
+        # 3. トラフィック・過去売上データをASINごとにマッピング
         traffic_map = {}
         for item in traffic_data.get("salesAndTrafficByAsin", []):
             asin = item.get("asin")
@@ -109,13 +120,10 @@ def main():
             revenue = float(sales_stats.get("orderedProductSales", {}).get("amount", 0.0))
             
             traffic_map[asin] = {
-                "pv": pv,
-                "sessions": sessions,
-                "units_sold": units_sold,
-                "revenue": revenue
+                "pv": pv, "sessions": sessions, "units_sold": units_sold, "revenue": revenue
             }
 
-        # 4. 在庫データ(TSV)を解析しながら、ビジネスレポートとマージ
+        # 4. 在庫データ(TSV)を解析しながらマージ
         lines = inventory_tsv.strip().split('\n')
         headers = lines[0].split('\t')
         
@@ -127,7 +135,6 @@ def main():
         
         sheet_payload = []
         
-        # Discordサマリー用の集計変数
         total_stock_items = 0
         total_stock_qty = 0
         total_pv_30d = 0
@@ -150,24 +157,20 @@ def main():
             try: price = float(cols[idx_price])
             except: price = 0.0
             
-            # 結合：このASINのPV・過去売上データを引っ張る
             t_data = traffic_map.get(asin, {"pv": 0, "sessions": 0, "units_sold": 0, "revenue": 0.0})
-            
             pv = t_data["pv"]
             sessions = t_data["sessions"]
             units_sold = t_data["units_sold"]
             revenue = t_data["revenue"]
             
-            # 💰 原価・利益の計算ロジック
-            if asin in PRODUCT_COSTS:
-                cost = float(PRODUCT_COSTS[asin])
-                # 過去30日利益 = 過去売上高 - (過去販売個数 × 原価)
+            # 💰 スプレッドシートから読み込んだ原価を適用
+            if asin in product_costs:
+                cost = float(product_costs[asin])
                 profit_30d = revenue - (units_sold * cost)
             else:
                 profit_30d = revenue * DEFAULT_PROFIT_RATE
                 cost = price - (price * DEFAULT_PROFIT_RATE)
                 
-            # サマリー集計に加算
             if qty > 0:
                 total_stock_items += 1
                 total_stock_qty += qty
@@ -207,7 +210,7 @@ def main():
             f" ├ 💵 確定売上高: ￥{int(total_revenue_30d):,}\n"
             f" └ ✨ 期間内確定粗利: ￥{int(total_profit_30d):,}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"※PVおよび確定業績は、Amazonの集計仕様に則り【直近32日前〜2日前までの30日間】のデータを集計しています。"
+            f"※原価データはスプレッドシートの『原価設定』シートより自動計算しています。"
         )
         
         if DISCORD_WEBHOOK_SUMMARY:
