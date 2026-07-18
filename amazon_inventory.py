@@ -6,7 +6,7 @@ import datetime
 import requests
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 💡 改良版：仕入れ値はGoogleスプレッドシートから自動取得します！
+# 💡 仕入れ値はGoogleスプレッドシートの「原価設定」タブから自動取得します
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DEFAULT_PROFIT_RATE = 0.4  # スプレッドシートに登録がない商品の利益率（40%）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -53,14 +53,14 @@ def request_and_download_report(token, report_type, extra_body=None):
         
     res = requests.post(url, headers=headers, json=body)
     if res.status_code != 202:
-        raise Exception(f"レポート[{report_type}]要求失敗: {res.text}")
+        raise Exception(f"要求失敗 ({res.status_code}): {res.text}")
         
     report_id = res.json().get("reportId")
     
     report_doc_id = None
     for i in range(30):
         time.sleep(10)
-        print(f"⏱️ Amazon側の集計完了を待っています... ({ (i+1)*10 }秒経過)")
+        print(f"⏱️ Amazon側の集計完了を待っています... [{report_type}] ({ (i+1)*10 }秒経過)")
         check_res = requests.get(f"{url}/{report_id}", headers=headers)
         res_json = check_res.json()
         status = res_json.get("processingStatus")
@@ -69,11 +69,11 @@ def request_and_download_report(token, report_type, extra_body=None):
             report_doc_id = res_json.get("reportDocumentId")
             break
         elif status == "FATAL":
-            reason = res_json.get("statusReason", "理由の詳細は返されませんでした")
-            raise Exception(f"Amazon側でレポート[{report_type}]の生成が致命的エラーになりました。理由: {reason}")
+            reason = res_json.get("statusReason", "理由詳細は返されませんでした")
+            raise Exception(f"Amazon内部エラー(FATAL)。理由: {reason}")
             
     if not report_doc_id:
-        raise Exception(f"Amazon側のデータ作成が混雑のため制限時間（5分）を超過しました。少し時間を置いて再実行してください。")
+        raise Exception(f"制限時間（5分）を超過しました。")
         
     doc_res = requests.get(f"https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/documents/{report_doc_id}", headers=headers)
     doc_data = doc_res.json()
@@ -90,22 +90,37 @@ def main():
         token = get_access_token()
         product_costs = get_spreadsheet_costs()
         
-        # 💡 【変更点】よりエラーが起きにくい「GET_FBA_MYI_ALL_DATA」に変更しました
-        print("🔄 AmazonにFBA在庫レポート(全データ版)を要求中...")
-        inventory_tsv = request_and_download_report(token, "GET_FBA_MYI_ALL_DATA")
+        inventory_tsv = ""
+        traffic_data = {}
         
+        # 1. FBA在庫レポートの取得（本来の正しい型番に戻します）
+        print("🔄 AmazonにFBA在庫レポートを要求中...")
+        try:
+            inventory_tsv = request_and_download_report(token, "GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA")
+            print("✅ 在庫レポートの取得に成功しました。")
+        except Exception as inv_e:
+            print(f"⚠️ 在庫レポートの取得をスキップします（FBA在庫が0件、またはAmazon側の権限未承認の可能性あり）: {inv_e}")
+            print("💡 動きのある商品（PV・売上データ）のみで集計を続行します。")
+        
+        # 2. ビジネスレポート（PV・トラフィック）の取得
         print("🔄 直近30日間のPV・アクセスデータを取得中...")
-        now = datetime.datetime.now(datetime.timezone.utc)
-        start_date = (now - datetime.timedelta(days=32)).strftime('%Y-%m-%dT00:00:00Z')
-        end_date = (now - datetime.timedelta(days=2)).strftime('%Y-%m-%dT00:00:00Z')
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            start_date = (now - datetime.timedelta(days=32)).strftime('%Y-%m-%dT00:00:00Z')
+            end_date = (now - datetime.timedelta(days=2)).strftime('%Y-%m-%dT00:00:00Z')
+            
+            traffic_json_str = request_and_download_report(
+                token, 
+                "GET_SALES_AND_TRAFFIC_REPORT", 
+                extra_body={"dataStartTime": start_date, "dataEndTime": end_date}
+            )
+            traffic_data = json.loads(traffic_json_str)
+            print("✅ ビジネスレポート（PV・売上）の取得に成功しました。")
+        except Exception as tr_e:
+            print(f"❌ ビジネスレポートの取得に失敗しました。処理を中断します: {tr_e}")
+            return
         
-        traffic_json_str = request_and_download_report(
-            token, 
-            "GET_SALES_AND_TRAFFIC_REPORT", 
-            extra_body={"dataStartTime": start_date, "dataEndTime": end_date}
-        )
-        traffic_data = json.loads(traffic_json_str)
-        
+        # 3. トラフィック・過去売上データをASINごとにマッピング
         traffic_map = {}
         for item in traffic_data.get("salesAndTrafficByAsin", []):
             asin = item.get("asin")
@@ -121,16 +136,8 @@ def main():
                 "pv": pv, "sessions": sessions, "units_sold": units_sold, "revenue": revenue
             }
 
-        lines = inventory_tsv.strip().split('\n')
-        headers = lines[0].split('\t')
-        
-        idx_sku = headers.index('sku')
-        idx_asin = headers.index('asin')
-        idx_name = headers.index('product-name')
-        idx_price = headers.index('your-price')
-        idx_qty = headers.index('afn-fulfillable-quantity')
-        
         sheet_payload = []
+        processed_asins = set()
         
         total_stock_items = 0
         total_stock_qty = 0
@@ -140,36 +147,84 @@ def main():
         total_revenue_30d = 0
         total_profit_30d = 0
         
-        for line in lines[1:]:
-            cols = line.split('\t')
-            if len(cols) <= max(idx_sku, idx_asin, idx_name, idx_price, idx_qty):
+        # 4-A. 在庫レポートが無事に取得できていた場合は解析
+        if inventory_tsv:
+            lines = inventory_tsv.strip().split('\n')
+            if len(lines) > 1:
+                headers = lines[0].split('\t')
+                idx_sku = headers.index('sku')
+                idx_asin = headers.index('asin')
+                idx_name = headers.index('product-name')
+                idx_price = headers.index('your-price')
+                idx_qty = headers.index('afn-fulfillable-quantity')
+                
+                for line in lines[1:]:
+                    cols = line.split('\t')
+                    if len(cols) <= max(idx_sku, idx_asin, idx_name, idx_price, idx_qty):
+                        continue
+                        
+                    sku = cols[idx_sku]
+                    asin = cols[idx_asin]
+                    title = cols[idx_name][:50] + "..." if len(cols[idx_name]) > 50 else cols[idx_name]
+                    
+                    try: qty = int(cols[idx_qty])
+                    except: qty = 0
+                    try: price = float(cols[idx_price])
+                    except: price = 0.0
+                    
+                    processed_asins.add(asin)
+                    
+                    t_data = traffic_map.get(asin, {"pv": 0, "sessions": 0, "units_sold": 0, "revenue": 0.0})
+                    pv = t_data["pv"]
+                    sessions = t_data["sessions"]
+                    units_sold = t_data["units_sold"]
+                    revenue = t_data["revenue"]
+                    
+                    if asin in product_costs:
+                        cost = float(product_costs[asin])
+                        profit_30d = revenue - (units_sold * cost)
+                    else:
+                        profit_30d = revenue * DEFAULT_PROFIT_RATE
+                        cost = price - (price * DEFAULT_PROFIT_RATE)
+                        
+                    if qty > 0:
+                        total_stock_items += 1
+                        total_stock_qty += qty
+                    total_pv_30d += pv
+                    total_sessions_30d += sessions
+                    total_sales_30d += units_sold
+                    total_revenue_30d += revenue
+                    total_profit_30d += profit_30d
+                    
+                    sheet_payload.append({
+                        "sku": sku, "asin": asin, "title": title, "quantity": qty,
+                        "price": int(price), "cost": int(cost), "pv": pv, "sessions": sessions,
+                        "sales_30d": units_sold, "revenue_30d": int(revenue), "profit_30d": int(profit_30d)
+                    })
+
+        # 4-B. 【超強化】在庫レポートがエラーだった、あるいは在庫データに載っていないが、
+        #       直近30日間に「閲覧や売上」の動きがあった商品をビジネスレポートから自動で補完・救済します
+        for asin, t_data in traffic_map.items():
+            if asin in processed_asins:
                 continue
                 
-            sku = cols[idx_sku]
-            asin = cols[idx_asin]
-            title = cols[idx_name][:50] + "..." if len(cols[idx_name]) > 50 else cols[idx_name]
-            
-            try: qty = int(cols[idx_qty])
-            except: qty = 0
-            try: price = float(cols[idx_price])
-            except: price = 0.0
-            
-            t_data = traffic_map.get(asin, {"pv": 0, "sessions": 0, "units_sold": 0, "revenue": 0.0})
             pv = t_data["pv"]
             sessions = t_data["sessions"]
             units_sold = t_data["units_sold"]
             revenue = t_data["revenue"]
+            
+            sku = "データなし (FBAエラー)" if not inventory_tsv else "出品中 (在庫0)"
+            title = f"ASIN: {asin} (直近30日以内にアクセスまたは売上あり)"
+            qty = 0  # 在庫レポートがスキップされたため、一時的に0として処理
+            price = 0.0
             
             if asin in product_costs:
                 cost = float(product_costs[asin])
                 profit_30d = revenue - (units_sold * cost)
             else:
                 profit_30d = revenue * DEFAULT_PROFIT_RATE
-                cost = price - (price * DEFAULT_PROFIT_RATE)
+                cost = 0.0
                 
-            if qty > 0:
-                total_stock_items += 1
-                total_stock_qty += qty
             total_pv_30d += pv
             total_sessions_30d += sessions
             total_sales_30d += units_sold
@@ -182,18 +237,28 @@ def main():
                 "sales_30d": units_sold, "revenue_30d": int(revenue), "profit_30d": int(profit_30d)
             })
             
+        # 5. スプレッドシートへ送信
         print("📊 Googleスプレッドシートへ最新データを送信中...")
         requests.post(INVENTORY_GAS_URL, json=sheet_payload)
         
+        # 6. 新しいDiscordチャンネルへサマリー通知を送信
         print("📢 独立したDiscordチャンネルへ総括サマリーを送信中...")
         report_date = datetime.datetime.now().strftime('%Y/%m/%d')
+        
+        # 在庫レポートの状態によって通知文をスマートに切り替え
+        if inventory_tsv:
+            stock_status_str = (
+                f" ├ 種類数: {total_stock_items} 品目\n"
+                f" └ 総在庫数: {total_stock_qty} 個"
+            )
+        else:
+            stock_status_str = " ⚠️ Amazon在庫データ取得不可（売上高・PVのみを集計中）"
         
         discord_msg = (
             f"📊 **【Amazon】店舗経営・在庫総括レポート ({report_date})**\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"📦 **現在のFBA在庫ステータス**\n"
-            f" ├ 種類数: {total_stock_items} 品目\n"
-            f" └ 総在庫数: {total_stock_qty} 個\n"
+            {stock_status_str}\n"
             f"-----------------------------------\n"
             f"📈 **直近30日間のトラフィック (PV状況)**\n"
             f" ├ 👁️ 総ページ閲覧数(PV): {total_pv_30d:,} PV\n"
@@ -204,7 +269,7 @@ def main():
             f" ├ 💵 確定売上高: ￥{int(total_revenue_30d):,}\n"
             f" └ ✨ 期間内確定粗利: ￥{int(total_profit_30d):,}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"※原価データはスプレッドシートの『原価設定』シートより自動計算しています。"
+            f"※PVおよび業績は【直近32日前〜2日前までの30日間】のデータを集計しています。"
         )
         
         if DISCORD_WEBHOOK_SUMMARY:
