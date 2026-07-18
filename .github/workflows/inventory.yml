@@ -27,10 +27,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
+      # （上略）
       - name: Run Inventory Script
         env:
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
           INVENTORY_GAS_URL: ${{ secrets.INVENTORY_GAS_URL }}
+          DISCORD_WEBHOOK_SUMMARY: ${{ secrets.DISCORD_WEBHOOK_SUMMARY }} # 💡ここを追加！
         run: python amazon_inventory.py
