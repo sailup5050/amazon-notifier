@@ -32,7 +32,6 @@ def get_access_token():
     raise Exception("認証トークンの取得に失敗しました")
 
 def get_spreadsheet_costs():
-    """💡 スプレッドシートの『原価設定』シートからリアルタイムに原価マップを取得する"""
     print("📋 スプレッドシートから仕入れ値データを読み込み中...")
     try:
         res = requests.get(INVENTORY_GAS_URL)
@@ -63,12 +62,16 @@ def request_and_download_report(token, report_type, extra_body=None):
         time.sleep(10)
         print(f"⏱️ Amazon側の集計完了を待っています... ({ (i+1)*10 }秒経過)")
         check_res = requests.get(f"{url}/{report_id}", headers=headers)
-        status = check_res.json().get("processingStatus")
+        res_json = check_res.json()
+        status = res_json.get("processingStatus")
+        
         if status == "DONE":
-            report_doc_id = check_res.json().get("reportDocumentId")
+            report_doc_id = res_json.get("reportDocumentId")
             break
+        # 💡 【変更点】Amazonが拒否した理由（statusReason）をログに詳しく出力するようにしました
         elif status == "FATAL":
-            raise Exception(f"Amazon側でレポート[{report_type}]の生成が致命的エラーになりました")
+            reason = res_json.get("statusReason", "理由の詳細は返されませんでした")
+            raise Exception(f"Amazon側でレポート[{report_type}]の生成が致命的エラーになりました。理由: {reason}")
             
     if not report_doc_id:
         raise Exception(f"Amazon側のデータ作成が混雑のため制限時間（5分）を超過しました。少し時間を置いて再実行してください。")
@@ -86,15 +89,11 @@ def request_and_download_report(token, report_type, extra_body=None):
 def main():
     try:
         token = get_access_token()
-        
-        # 💡 スプレッドシートから最新の原価設定を取得
         product_costs = get_spreadsheet_costs()
         
-        # 1. FBA在庫レポートの取得 (TSV)
         print("🔄 AmazonにFBA在庫レポートを要求中...")
         inventory_tsv = request_and_download_report(token, "GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA")
         
-        # 2. ビジネスレポート（PV・トラフィック）の取得 (JSON)
         print("🔄 直近30日間のPV・アクセスデータを取得中...")
         now = datetime.datetime.now(datetime.timezone.utc)
         start_date = (now - datetime.timedelta(days=32)).strftime('%Y-%m-%dT00:00:00Z')
@@ -107,7 +106,6 @@ def main():
         )
         traffic_data = json.loads(traffic_json_str)
         
-        # 3. トラフィック・過去売上データをASINごとにマッピング
         traffic_map = {}
         for item in traffic_data.get("salesAndTrafficByAsin", []):
             asin = item.get("asin")
@@ -123,7 +121,6 @@ def main():
                 "pv": pv, "sessions": sessions, "units_sold": units_sold, "revenue": revenue
             }
 
-        # 4. 在庫データ(TSV)を解析しながらマージ
         lines = inventory_tsv.strip().split('\n')
         headers = lines[0].split('\t')
         
@@ -163,7 +160,6 @@ def main():
             units_sold = t_data["units_sold"]
             revenue = t_data["revenue"]
             
-            # 💰 スプレッドシートから読み込んだ原価を適用
             if asin in product_costs:
                 cost = float(product_costs[asin])
                 profit_30d = revenue - (units_sold * cost)
@@ -186,11 +182,9 @@ def main():
                 "sales_30d": units_sold, "revenue_30d": int(revenue), "profit_30d": int(profit_30d)
             })
             
-        # 5. スプレッドシートへ送信
         print("📊 Googleスプレッドシートへ最新データを送信中...")
         requests.post(INVENTORY_GAS_URL, json=sheet_payload)
         
-        # 6. 新しいDiscordチャンネルへサマリー通知を送信
         print("📢 独立したDiscordチャンネルへ総括サマリーを送信中...")
         report_date = datetime.datetime.now().strftime('%Y/%m/%d')
         
@@ -207,7 +201,7 @@ def main():
             f"-----------------------------------\n"
             f"💰 **直近30日間の確定パフォーマンス**\n"
             f" ├ 🔢 確定販売個数: {total_sales_30d} 個\n"
-            f" ├ 💵 確定売上高: ￥{int(total_revenue_30d):,}\n"
+            f" ├ 💵 確定売高: ￥{int(total_revenue_30d):,}\n"
             f" └ ✨ 期間内確定粗利: ￥{int(total_profit_30d):,}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
             f"※原価データはスプレッドシートの『原価設定』シートより自動計算しています。"
