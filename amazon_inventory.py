@@ -126,19 +126,44 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
     headers = [h.strip().lower() for h in lines[0].split('\t')]
     
     idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h or '商品id' in h), None)
-    idx_qty = next((i for i, h in enumerate(headers) if 'quantity' in h or 'qty' in h or 'fulfillable' in h or '数量' in h or '販売可能' in h), None)
+    
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 💡 【改修ポイント】FBA在庫数の列を厳格に特定する
+    # （Amazonは自己発送の列が先に来るため、それを避けてFBA列を狙います）
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    idx_qty = None
+    # 1. まずFBA専用の列名（afnやamazon出荷）を最優先で探す
+    for i, h in enumerate(headers):
+        h_clean = h.replace('"', '').replace(' ', '')
+        if 'afn-fulfillable' in h_clean or 'amazon出荷' in h_clean or 'afn-total' in h_clean:
+            idx_qty = i
+            break
+            
+    # 2. 見つからない場合は「販売可能」などの列から、自己発送(mfn)の列を除外して探す
+    if idx_qty is None:
+        for i, h in enumerate(headers):
+            h_clean = h.replace('"', '').replace(' ', '')
+            is_qty_col = ('quantity' in h_clean or 'qty' in h_clean or 'fulfillable' in h_clean or '数量' in h_clean or '販売可能' in h_clean)
+            is_not_mfn = ('mfn' not in h_clean and '出品者' not in h_clean)
+            if is_qty_col and is_not_mfn:
+                idx_qty = i
+                break
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
     idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h or '出品者' in h), None)
     idx_name = next((i for i, h in enumerate(headers) if 'name' in h or 'title' in h or '商品名' in h), None)
     idx_price = next((i for i, h in enumerate(headers) if 'price' in h or '価格' in h), None)
     
     if idx_asin is None or idx_qty is None:
         return
+        
     for line in lines[1:]:
         cols = line.split('\t')
         if len(cols) > max(idx_asin, idx_qty):
-            asin = cols[idx_asin].strip()
-            qty_str = cols[idx_qty].strip()
-            try: qty = int(qty_str)
+            # 💡 【改修ポイント】Amazonのデータについている邪魔な「"」も一緒に除去するよう強化
+            asin = cols[idx_asin].replace('"', '').strip()
+            qty_str = cols[idx_qty].replace('"', '').replace(',', '').strip()
+            try: qty = int(float(qty_str)) # 万が一 10.0 のように来ても安全にint化
             except: qty = 0
             
             if asin:
@@ -147,12 +172,12 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
                 if asin not in backup_map:
                     backup_map[asin] = {}
                 if idx_sku is not None and len(cols) > idx_sku and cols[idx_sku].strip():
-                    backup_map[asin]['sku'] = cols[idx_sku].strip()
+                    backup_map[asin]['sku'] = cols[idx_sku].replace('"', '').strip()
                 if idx_name is not None and len(cols) > idx_name and cols[idx_name].strip():
-                    name = cols[idx_name].strip()
+                    name = cols[idx_name].replace('"', '').strip()
                     backup_map[asin]['title'] = name[:50] + "..." if len(name) > 50 else name
                 if idx_price is not None and len(cols) > idx_price and cols[idx_price].strip():
-                    try: backup_map[asin]['price'] = float(cols[idx_price].strip())
+                    try: backup_map[asin]['price'] = float(cols[idx_price].replace('"', '').replace(',', '').strip())
                     except: pass
 
 def main():
