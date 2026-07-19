@@ -84,7 +84,6 @@ def request_and_download_report(token, report_type, extra_body=None):
         content = gzip.decompress(content)
         
     # 💡【超重要修正】Amazon Japan特有の文字コード（Shift-JIS）に対応！
-    # 英語標準(UTF-8)でエラーになったら、日本語(cp932)で読み込み直します
     try:
         return content.decode('utf-8')
     except UnicodeDecodeError:
@@ -128,8 +127,7 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
     idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h or '商品id' in h), None)
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # 💡 【改修ポイント】FBA在庫数の列を厳格に特定する
-    # （Amazonは自己発送の列が先に来るため、それを避けてFBA列を狙います）
+    # 💡 【改修】FBA在庫数の列の特定
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     idx_qty = None
     # 1. まずFBA専用の列名（afnやamazon出荷）を最優先で探す
@@ -139,7 +137,7 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
             idx_qty = i
             break
             
-    # 2. 見つからない場合は「販売可能」などの列から、自己発送(mfn)の列を除外して探す
+    # 2. 見つからない場合は「販売可能」などの列から、自己発送(mfn)を除外して探す
     if idx_qty is None:
         for i, h in enumerate(headers):
             h_clean = h.replace('"', '').replace(' ', '')
@@ -148,37 +146,48 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
             if is_qty_col and is_not_mfn:
                 idx_qty = i
                 break
+                
+    # 3. 最終手段：一番右側にある在庫列を採用（FBAは通常MFNの右側に配置されるため）
+    if idx_qty is None:
+        candidates = [i for i, h in enumerate(headers) if 'quantity' in h or 'qty' in h or 'fulfillable' in h or '数量' in h or '販売可能' in h]
+        if candidates:
+            idx_qty = candidates[-1]
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
     idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h or '出品者' in h), None)
     idx_name = next((i for i, h in enumerate(headers) if 'name' in h or 'title' in h or '商品名' in h), None)
     idx_price = next((i for i, h in enumerate(headers) if 'price' in h or '価格' in h), None)
     
-    if idx_asin is None or idx_qty is None:
+    # 💡 【重要】在庫列が見つからなくても絶対に終了（return）せず、商品名の取得だけは続行する！
+    if idx_asin is None:
         return
         
     for line in lines[1:]:
         cols = line.split('\t')
-        if len(cols) > max(idx_asin, idx_qty):
-            # 💡 【改修ポイント】Amazonのデータについている邪魔な「"」も一緒に除去するよう強化
+        if len(cols) > idx_asin:
             asin = cols[idx_asin].replace('"', '').strip()
-            qty_str = cols[idx_qty].replace('"', '').replace(',', '').strip()
-            try: qty = int(float(qty_str)) # 万が一 10.0 のように来ても安全にint化
-            except: qty = 0
-            
-            if asin:
-                stock_map[asin] = stock_map.get(asin, 0) + qty
+            if not asin:
+                continue
                 
-                if asin not in backup_map:
-                    backup_map[asin] = {}
-                if idx_sku is not None and len(cols) > idx_sku and cols[idx_sku].strip():
-                    backup_map[asin]['sku'] = cols[idx_sku].replace('"', '').strip()
-                if idx_name is not None and len(cols) > idx_name and cols[idx_name].strip():
-                    name = cols[idx_name].replace('"', '').strip()
-                    backup_map[asin]['title'] = name[:50] + "..." if len(name) > 50 else name
-                if idx_price is not None and len(cols) > idx_price and cols[idx_price].strip():
-                    try: backup_map[asin]['price'] = float(cols[idx_price].replace('"', '').replace(',', '').strip())
-                    except: pass
+            # 在庫列がある場合のみ取得、なければ 0 扱い
+            qty = 0
+            if idx_qty is not None and len(cols) > idx_qty:
+                qty_str = cols[idx_qty].replace('"', '').replace(',', '').strip()
+                try: qty = int(float(qty_str)) 
+                except: qty = 0
+            
+            stock_map[asin] = stock_map.get(asin, 0) + qty
+            
+            if asin not in backup_map:
+                backup_map[asin] = {}
+            if idx_sku is not None and len(cols) > idx_sku and cols[idx_sku].strip():
+                backup_map[asin]['sku'] = cols[idx_sku].replace('"', '').strip()
+            if idx_name is not None and len(cols) > idx_name and cols[idx_name].strip():
+                name = cols[idx_name].replace('"', '').strip()
+                backup_map[asin]['title'] = name[:50] + "..." if len(name) > 50 else name
+            if idx_price is not None and len(cols) > idx_price and cols[idx_price].strip():
+                try: backup_map[asin]['price'] = float(cols[idx_price].replace('"', '').replace(',', '').strip())
+                except: pass
 
 def main():
     try:
@@ -308,6 +317,33 @@ def main():
         print("📊 Googleスプレッドシートへ完全データを送信中...")
         requests.post(INVENTORY_GAS_URL, json=sheet_payload)
         
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 👑 【新規追加】ランキングデータの生成処理
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # PVランキング Top5 (PVが0より大きいものを対象)
+        top_pv_items = sorted([x for x in sheet_payload if x['pv'] > 0], key=lambda x: x['pv'], reverse=True)[:5]
+        pv_ranking_str = ""
+        if not top_pv_items:
+            pv_ranking_str = " └ 期間内のアクセスデータなし\n"
+        else:
+            for i, item in enumerate(top_pv_items, 1):
+                # タイトルが長い場合は25文字でスマートに省略（Discord画面が崩れないように）
+                short_title = item['title'][:25] + "..." if len(item['title']) > 25 else item['title']
+                prefix = " └" if i == len(top_pv_items) else " ├"
+                pv_ranking_str += f"{prefix} {i}位: {item['pv']:,} PV ({short_title})\n"
+
+        # 販売数ランキング Top5 (売上が1個以上あるものを対象)
+        top_sales_items = sorted([x for x in sheet_payload if x['sales_30d'] > 0], key=lambda x: x['sales_30d'], reverse=True)[:5]
+        sales_ranking_str = ""
+        if not top_sales_items:
+            sales_ranking_str = " └ 期間内の販売実績なし\n"
+        else:
+            for i, item in enumerate(top_sales_items, 1):
+                short_title = item['title'][:25] + "..." if len(item['title']) > 25 else item['title']
+                prefix = " └" if i == len(top_sales_items) else " ├"
+                sales_ranking_str += f"{prefix} {i}位: {item['sales_30d']:,} 個 ({short_title})\n"
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
         print("📢 独立したDiscordチャンネルへ総括サマリーを送信中...")
         report_date = datetime.datetime.now().strftime('%Y/%m/%d')
         
@@ -327,11 +363,17 @@ def main():
             f" ├ 💵 確定売上高: ￥{int(total_revenue_30d):,}\n"
             f" └ ✨ 期間内確定粗利: ￥{int(total_profit_30d):,}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 **【注目】アクセスランキング Top5**\n"
+            f"{pv_ranking_str}"
+            f"-----------------------------------\n"
+            f"👑 **【売れ筋】販売個数ランキング Top5**\n"
+            f"{sales_ranking_str}"
+            f"━━━━━━━━━━━━━━━━━━━\n"
         )
         
         if DISCORD_WEBHOOK_SUMMARY:
             requests.post(DISCORD_WEBHOOK_SUMMARY, json={"content": discord_msg})
-            print("🎉 すべての処理が正常完了しました！")
+            print("🎉 すべての処理とランキング通知が正常完了しました！")
             
     except Exception as e:
         print(f"❌ エラー発生: {e}")
