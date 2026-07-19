@@ -83,15 +83,21 @@ def request_and_download_report(token, report_type, extra_body=None):
     if doc_data.get("compressionAlgorithm") == "GZIP":
         content = gzip.decompress(content)
         
-    return content.decode('utf-8')
+    # 💡【超重要修正】Amazon Japan特有の文字コード（Shift-JIS）に対応！
+    # 英語標準(UTF-8)でエラーになったら、日本語(cp932)で読み込み直します
+    try:
+        return content.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            return content.decode('cp932')
+        except UnicodeDecodeError:
+            return content.decode('utf-8', errors='replace')
 
 def parse_listings_tsv(tsv_text, target_map):
-    """💡 【修正】日本語ヘッダー（商品名, 価格, 商品ID等）にも完全対応"""
     lines = tsv_text.strip().split('\n')
     if len(lines) <= 1:
         return
     headers = [h.strip().lower() for h in lines[0].split('\t')]
-    print(f"🔍 [デバッグ] 出品レポートの列名: {headers[:10]}...") # ログ確認用
     
     idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h or '出品者' in h), None)
     idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h or 'product-id' in h or '商品id' in h), None)
@@ -114,7 +120,6 @@ def parse_listings_tsv(tsv_text, target_map):
                 target_map[asin] = {"sku": sku, "title": name, "price": price}
 
 def parse_fba_inventory(tsv_text, stock_map, backup_map):
-    """💡 【修正】在庫レポートの日本語ヘッダー対応"""
     lines = tsv_text.strip().split('\n')
     if len(lines) <= 1:
         return
@@ -160,7 +165,6 @@ def main():
         fba_stock_map = {}
         traffic_data = {}
         
-        # 1. 出品レポートの取得
         print("🔄 Amazonに出品レポート(軽量版)を要求中...")
         try:
             listings_tsv = request_and_download_report(token, "GET_MERCHANT_LISTINGS_DATA")
@@ -175,7 +179,6 @@ def main():
             except Exception as l_e2:
                 print(f"⚠️ 出品レポートAPI制限。在庫データ側から復元します: {l_e2}")
         
-        # 2. FBA在庫レポートの取得
         print("🔄 AmazonにFBA在庫レポートを要求中...")
         try:
             fba_tsv = request_and_download_report(token, "GET_AFN_INVENTORY_DATA")
@@ -190,7 +193,6 @@ def main():
             except Exception as e2:
                 print(f"⚠️ 在庫レポートが両方スキップされました: {e2}")
         
-        # 3. ビジネスレポート（PV・トラフィック）の取得
         print("🔄 直近30日間のPV・アクセスデータを取得中...")
         try:
             now = datetime.datetime.now(datetime.timezone.utc)
@@ -208,7 +210,6 @@ def main():
             print(f"❌ ビジネスレポートの取得に失敗したため、処理を中断します: {tr_e}")
             return
         
-        # 4. トラフィック・過去売上データをASINごとにマッピング
         traffic_map = {}
         for item in traffic_data.get("salesAndTrafficByAsin", []):
             asin = item.get("childAsin") or item.get("parentAsin") or item.get("asin")
@@ -227,7 +228,6 @@ def main():
                 "pv": pv, "sessions": sessions, "units_sold": units_sold, "revenue": revenue
             }
 
-        # 5. すべてのデータを高度マージ
         all_asins = set(listings_map.keys()) | set(fba_stock_map.keys()) | set(traffic_map.keys())
         sheet_payload = []
         
@@ -254,7 +254,6 @@ def main():
             units_sold = t_data["units_sold"]
             revenue = t_data["revenue"]
             
-            # 出品価格が取得できなかった場合、直近の売上から逆算
             if price == 0.0 and units_sold > 0 and revenue > 0:
                 price = revenue / units_sold
             
@@ -281,11 +280,9 @@ def main():
                     "sales_30d": units_sold, "revenue_30d": int(revenue), "profit_30d": int(profit_30d)
                 })
             
-        # 6. スプレッドシートへ送信
         print("📊 Googleスプレッドシートへ完全データを送信中...")
         requests.post(INVENTORY_GAS_URL, json=sheet_payload)
         
-        # 7. Discordへサマリー通知を送信
         print("📢 独立したDiscordチャンネルへ総括サマリーを送信中...")
         report_date = datetime.datetime.now().strftime('%Y/%m/%d')
         
