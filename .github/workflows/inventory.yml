@@ -2,8 +2,8 @@ name: Amazon FBA Inventory Sync
 
 on:
   schedule:
-    # 💡 毎日日本時間の朝6:00（UTC 21:00）に自動実行
-    - cron: '0 21 * * *'
+    schedule:
+    - cron: '0 */4 * * *'
   workflow_dispatch: # 手動実行ボタンも出します
 
 env:
