@@ -83,7 +83,8 @@ def request_and_download_report(token, report_type, extra_body=None):
     if doc_data.get("compressionAlgorithm") == "GZIP":
         content = gzip.decompress(content)
         
-    # 💡 Amazon Japan特有の文字コード（Shift-JIS）に対応！
+    # 💡【超重要修正】Amazon Japan特有の文字コード（Shift-JIS）に対応！
+    # 英語標準(UTF-8)でエラーになったら、日本語(cp932)で読み込み直します
     try:
         return content.decode('utf-8')
     except UnicodeDecodeError:
@@ -123,32 +124,15 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
     if len(lines) <= 1:
         return
     headers = [h.strip().lower() for h in lines[0].split('\t')]
-    print(f"🔍 [デバッグ] 在庫レポートの列名: {headers[:10]}...") 
     
     idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h or '商品id' in h), None)
-    
-    # 💡 【完全修正】「自己発送（MFN）」の列を誤って拾って0にならないよう、FBA（AFN）専用の列を厳格に指定！
-    idx_qty = None
-    for i, h in enumerate(headers):
-        if h in ['afn-fulfillable-quantity', 'amazon出荷の販売可能在庫数', '販売可能数量', 'quantity available']:
-            idx_qty = i
-            break
-    
-    # 万が一上記でヒットしなかった場合の安全装置（mfn=自己発送 を絶対に除外する）
-    if idx_qty is None:
-        for i, h in enumerate(headers):
-            if ('fulfillable' in h and 'mfn' not in h) or ('販売可能' in h and '出品者' not in h and 'mfn' not in h):
-                idx_qty = i
-                break
-                
+    idx_qty = next((i for i, h in enumerate(headers) if 'quantity' in h or 'qty' in h or 'fulfillable' in h or '数量' in h or '販売可能' in h), None)
     idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h or '出品者' in h), None)
     idx_name = next((i for i, h in enumerate(headers) if 'name' in h or 'title' in h or '商品名' in h), None)
     idx_price = next((i for i, h in enumerate(headers) if 'price' in h or '価格' in h), None)
     
     if idx_asin is None or idx_qty is None:
-        print("⚠️ [警告] 在庫レポートからASINまたはFBA在庫数の列を見つけられませんでした。")
         return
-        
     for line in lines[1:]:
         cols = line.split('\t')
         if len(cols) > max(idx_asin, idx_qty):
