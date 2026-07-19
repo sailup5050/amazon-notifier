@@ -1,38 +1,29 @@
-name: Amazon FBA Inventory Sync
+name: Amazon Inventory Bot
 
 on:
+  # 💡 手動でも実行できるように残しておきます
+  workflow_dispatch: 
+  
+  # 💡 4時間に1回自動実行する設定を追加
   schedule:
-    schedule:
     - cron: '0 */4 * * *'
-  workflow_dispatch: # 手動実行ボタンも出します
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 jobs:
-  sync-inventory:
+  build:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v3
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
-
+          python-version: '3.x'
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      # （上略）
-      - name: Run Inventory Script
+        run: pip install requests
+      - name: Run script
         env:
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
           INVENTORY_GAS_URL: ${{ secrets.INVENTORY_GAS_URL }}
-          DISCORD_WEBHOOK_SUMMARY: ${{ secrets.DISCORD_WEBHOOK_SUMMARY }} # 💡ここを追加！
+          DISCORD_WEBHOOK_SUMMARY: ${{ secrets.DISCORD_WEBHOOK_SUMMARY }}
         run: python amazon_inventory.py
