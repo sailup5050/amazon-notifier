@@ -58,7 +58,8 @@ def request_and_download_report(token, report_type, extra_body=None):
     report_id = res.json().get("reportId")
     
     report_doc_id = None
-    for i in range(30):
+    # 💡 制限時でも待てるように待機時間を40回(約6分半)に延長
+    for i in range(40):
         time.sleep(10)
         print(f"⏱️ Amazon側の集計完了を待っています... [{report_type}] ({ (i+1)*10 }秒経過)")
         check_res = requests.get(f"{url}/{report_id}", headers=headers)
@@ -68,12 +69,12 @@ def request_and_download_report(token, report_type, extra_body=None):
         if status == "DONE":
             report_doc_id = res_json.get("reportDocumentId")
             break
-        elif status == "FATAL":
+        elif status == "FATAL" or status == "CANCELLED":
             reason = res_json.get("statusReason", "理由詳細は返されませんでした")
-            raise Exception(f"Amazon内部エラー(FATAL)。理由: {reason}")
+            raise Exception(f"Amazon内部エラーまたは制限({status})。理由: {reason}")
             
     if not report_doc_id:
-        raise Exception(f"制限時間（5分）を超過しました。")
+        raise Exception(f"制限時間を超過しました。")
         
     doc_res = requests.get(f"https://sellingpartnerapi-fe.amazon.com/reports/2021-06-30/documents/{report_doc_id}", headers=headers)
     doc_data = doc_res.json()
@@ -91,88 +92,97 @@ def request_and_download_report(token, report_type, extra_body=None):
         except UnicodeDecodeError:
             return content.decode('utf-8', errors='replace')
 
+# 💡 確実な列取得のための新機能（完全一致と部分一致を使い分ける）
+def get_col_idx(headers, keywords, excludes=None):
+    excludes = excludes or []
+    for k in keywords:
+        for i, h in enumerate(headers):
+            if h == k and not any(ex in h for ex in excludes): return i
+    for k in keywords:
+        for i, h in enumerate(headers):
+            if k in h and not any(ex in h for ex in excludes): return i
+    return None
+
 def parse_listings_tsv(tsv_text, target_map):
     lines = tsv_text.strip().split('\n')
-    if len(lines) <= 1:
-        return
+    if len(lines) <= 1: return
     headers = [h.replace('"', '').strip().lower() for h in lines[0].split('\t')]
     
-    idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h or '出品者' in h), None)
-    idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h or 'product-id' in h or '商品id' in h), None)
-    idx_name = next((i for i, h in enumerate(headers) if 'name' in h or 'title' in h or '商品名' in h), None)
-    idx_price = next((i for i, h in enumerate(headers) if 'price' in h or 'your-price' in h or '価格' in h), None)
+    idx_sku = get_col_idx(headers, ['seller-sku', 'sku', '出品者sku', '出品者'])
+    idx_asin = get_col_idx(headers, ['asin1', 'asin', 'product-id', '商品id'])
+    idx_name = get_col_idx(headers, ['item-name', 'product-name', 'title', 'name', '商品名', '名称'])
+    idx_price = get_col_idx(headers, ['price', 'your-price', '価格'])
     
     for line in lines[1:]:
         cols = line.split('\t')
-        if idx_sku is not None and idx_asin is not None and len(cols) > max(idx_sku, idx_asin):
-            sku = cols[idx_sku].replace('"', '').strip()
+        if idx_asin is not None and len(cols) > idx_asin:
             asin = cols[idx_asin].replace('"', '').strip()
+            if not asin: continue
+            
+            sku = cols[idx_sku].replace('"', '').strip() if idx_sku is not None and len(cols) > idx_sku else ""
             name = cols[idx_name].replace('"', '').strip() if idx_name is not None and len(cols) > idx_name else ""
-            price_str = cols[idx_price].replace('"', '').strip() if idx_price is not None and len(cols) > idx_price else "0"
             
-            try: price = float(price_str.replace(',', ''))
-            except: price = 0.0
+            price = 0.0
+            if idx_price is not None and len(cols) > idx_price:
+                try: price = float(cols[idx_price].replace('"', '').replace(',', '').strip())
+                except: pass
             
-            if len(name) > 100:
-                name = name[:100] + "..."
-            if asin:
+            if len(name) > 100: name = name[:100] + "..."
+            
+            if asin not in target_map:
                 target_map[asin] = {"sku": sku, "title": name, "price": price}
+            else:
+                if name: target_map[asin]["title"] = name
+                if sku: target_map[asin]["sku"] = sku
+                if price > 0: target_map[asin]["price"] = price
 
 def parse_fba_inventory(tsv_text, stock_map, backup_map):
     lines = tsv_text.strip().split('\n')
-    if len(lines) <= 1:
-        return
+    if len(lines) <= 1: return
     headers = [h.replace('"', '').strip().lower() for h in lines[0].split('\t')]
     
-    idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h or '商品id' in h), None)
-    idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h or '出品者' in h), None)
-    idx_name = next((i for i, h in enumerate(headers) if 'name' in h or 'title' in h or '商品名' in h), None)
-    idx_price = next((i for i, h in enumerate(headers) if 'price' in h or 'your-price' in h or '価格' in h), None)
+    idx_asin = get_col_idx(headers, ['asin', '商品id'])
+    idx_sku = get_col_idx(headers, ['seller-sku', 'sku', '出品者sku', '出品者'])
+    idx_name = get_col_idx(headers, ['product-name', 'item-name', 'title', 'name', '商品名', '名称'])
+    idx_price = get_col_idx(headers, ['your-price', 'price', '価格'])
     
-    idx_qty = None
-    for i, h in enumerate(headers):
-        if 'afn-fulfillable' in h or 'afn-total' in h:
-            idx_qty = i
-            
+    idx_qty = get_col_idx(headers, ['afn-fulfillable-quantity', 'afn-total', '販売可能数量'], excludes=['mfn', '出品者'])
     if idx_qty is None:
-        for i, h in enumerate(headers):
-            if '販売可能数量' in h or 'quantity available' in h or 'fulfillable' in h:
-                if 'mfn' not in h and '出品者' not in h:
-                    idx_qty = i
-                    
-    if idx_qty is None:
-        for i, h in enumerate(headers):
-            if 'qty' in h or 'quantity' in h or '数量' in h or '在庫' in h:
-                if 'mfn' not in h and '出品者' not in h:
-                    idx_qty = i
-                    
-    if idx_asin is None:
-        return
+        idx_qty = get_col_idx(headers, ['fulfillable', 'quantity', 'qty', '数量', '在庫'], excludes=['mfn', '出品者'])
+        
+    if idx_asin is None: return
         
     for line in lines[1:]:
         cols = line.split('\t')
         if len(cols) > idx_asin:
             asin = cols[idx_asin].replace('"', '').strip()
-            if not asin:
-                continue
-                
+            if not asin: continue
+            
             qty = 0
             if idx_qty is not None and len(cols) > idx_qty:
-                qty_str = cols[idx_qty].replace('"', '').replace(',', '').strip()
-                try: qty = int(float(qty_str)) 
-                except: qty = 0
+                try: qty = int(float(cols[idx_qty].replace('"', '').replace(',', '').strip()))
+                except: pass
             
             stock_map[asin] = stock_map.get(asin, 0) + qty
             
             if asin not in backup_map:
                 backup_map[asin] = {}
-            if idx_sku is not None and len(cols) > idx_sku and cols[idx_sku].strip():
-                backup_map[asin]['sku'] = cols[idx_sku].replace('"', '').strip()
-            if idx_name is not None and len(cols) > idx_name and cols[idx_name].strip():
-                name = cols[idx_name].replace('"', '').strip()
-                backup_map[asin]['title'] = name[:100] + "..." if len(name) > 100 else name
-            if idx_price is not None and len(cols) > idx_price and cols[idx_price].strip():
-                try: backup_map[asin]['price'] = float(cols[idx_price].replace('"', '').replace(',', '').strip())
+            
+            if idx_sku is not None and len(cols) > idx_sku:
+                s = cols[idx_sku].replace('"', '').strip()
+                if s and not backup_map[asin].get('sku'):
+                    backup_map[asin]['sku'] = s
+            
+            if idx_name is not None and len(cols) > idx_name:
+                n = cols[idx_name].replace('"', '').strip()
+                if n and not backup_map[asin].get('title'):
+                    backup_map[asin]['title'] = n[:100] + "..." if len(n)>100 else n
+                    
+            if idx_price is not None and len(cols) > idx_price:
+                try:
+                    p = float(cols[idx_price].replace('"', '').replace(',', '').strip())
+                    if p > 0 and not backup_map[asin].get('price'):
+                        backup_map[asin]['price'] = p
                 except: pass
 
 def main():
@@ -186,32 +196,37 @@ def main():
         traffic_data = {}
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 💡 【改修ポイント】在庫切れ（非アクティブ）を含めるため、全データ版を最優先にしました
+        # 💡 【改修】API制限対策。成功するまで複数のレポートを次々に試します
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        print("🔄 Amazonに出品レポート(全データ版)を要求中...")
-        try:
-            listings_tsv = request_and_download_report(token, "GET_MERCHANT_LISTINGS_ALL_DATA")
-            parse_listings_tsv(listings_tsv, listings_map)
-            print("✅ 全データ版出品レポートからマスターデータを構築しました。")
-        except Exception as l_e:
-            print(f"⚠️ 全データ版制限のためアクティブ出品レポートで再トライします: {l_e}")
+        print("🔄 Amazonに商品マスタ（商品名・SKU）レポートを要求中...")
+        listings_reports = [
+            "GET_MERCHANT_LISTINGS_ALL_DATA",       # 全件（停止中含む）
+            "GET_MERCHANT_LISTINGS_DATA",           # アクティブのみ
+            "GET_MERCHANT_LISTINGS_INACTIVE_DATA"   # 非アクティブのみ
+        ]
+        for r_type in listings_reports:
             try:
-                listings_tsv = request_and_download_report(token, "GET_MERCHANT_LISTINGS_DATA")
-                parse_listings_tsv(listings_tsv, listings_map)
-                print("✅ 軽量版(アクティブ)出品レポートからマスターデータを構築しました。")
-            except Exception as l_e2:
-                print(f"⚠️ 出品レポートAPI制限。在庫データ側から復元します: {l_e2}")
+                tsv = request_and_download_report(token, r_type)
+                parse_listings_tsv(tsv, listings_map)
+                print(f"✅ {r_type} から商品データを取得しました。")
+                break  # 成功したら抜ける
+            except Exception as e:
+                print(f"⚠️ {r_type} 制限/エラーのため次を試します: {e}")
         
         print("🔄 AmazonにFBA在庫レポートを要求中...")
-        fba_reports = ["GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA", "GET_AFN_INVENTORY_DATA"]
-        for report_type in fba_reports:
+        fba_reports = [
+            "GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA", # 商品名あり
+            "GET_FBA_MYI_ALL_INVENTORY_DATA",          # 商品名あり
+            "GET_AFN_INVENTORY_DATA"                   # 商品名なし（在庫数のみ・最終手段）
+        ]
+        for r_type in fba_reports:
             try:
-                fba_tsv = request_and_download_report(token, report_type)
+                fba_tsv = request_and_download_report(token, r_type)
                 parse_fba_inventory(fba_tsv, fba_stock_map, listings_backup)
-                print(f"✅ FBA在庫レポート({report_type})の解析に成功しました。")
-                break
+                print(f"✅ FBA在庫レポート({r_type})の解析に成功しました。")
+                break  # 成功したら抜ける
             except Exception as e:
-                print(f"⚠️ {report_type} をスキップします: {e}")
+                print(f"⚠️ {r_type} 制限/エラーのため次を試します: {e}")
         
         print("🔄 直近30日間のPV・アクセスデータを取得中...")
         try:
