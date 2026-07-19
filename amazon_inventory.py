@@ -95,7 +95,6 @@ def parse_listings_tsv(tsv_text, target_map):
     lines = tsv_text.strip().split('\n')
     if len(lines) <= 1:
         return
-    # 💡 ゴミ（" や空白）を完全に除去して小文字化
     headers = [h.replace('"', '').strip().lower() for h in lines[0].split('\t')]
     
     idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h or '出品者' in h), None)
@@ -114,8 +113,8 @@ def parse_listings_tsv(tsv_text, target_map):
             try: price = float(price_str.replace(',', ''))
             except: price = 0.0
             
-            if len(name) > 50:
-                name = name[:50] + "..."
+            if len(name) > 100:
+                name = name[:100] + "..."
             if asin:
                 target_map[asin] = {"sku": sku, "title": name, "price": price}
 
@@ -131,19 +130,16 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
     idx_price = next((i for i, h in enumerate(headers) if 'price' in h or 'your-price' in h or '価格' in h), None)
     
     idx_qty = None
-    # 1. 優先: 明確にFBA/AFNの数量を示す列
     for i, h in enumerate(headers):
         if 'afn-fulfillable' in h or 'afn-total' in h:
             idx_qty = i
             
-    # 2. 次点: 販売可能数量 (自己発送を除外)
     if idx_qty is None:
         for i, h in enumerate(headers):
             if '販売可能数量' in h or 'quantity available' in h or 'fulfillable' in h:
                 if 'mfn' not in h and '出品者' not in h:
                     idx_qty = i
                     
-    # 3. 妥協: 数量・在庫 (自己発送を除外、右側を優先)
     if idx_qty is None:
         for i, h in enumerate(headers):
             if 'qty' in h or 'quantity' in h or '数量' in h or '在庫' in h:
@@ -160,7 +156,6 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
             if not asin:
                 continue
                 
-            # 在庫数の取得（列があれば）
             qty = 0
             if idx_qty is not None and len(cols) > idx_qty:
                 qty_str = cols[idx_qty].replace('"', '').replace(',', '').strip()
@@ -169,14 +164,13 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
             
             stock_map[asin] = stock_map.get(asin, 0) + qty
             
-            # API制限時のためのバックアップデータの取得（商品名・SKUなど）
             if asin not in backup_map:
                 backup_map[asin] = {}
             if idx_sku is not None and len(cols) > idx_sku and cols[idx_sku].strip():
                 backup_map[asin]['sku'] = cols[idx_sku].replace('"', '').strip()
             if idx_name is not None and len(cols) > idx_name and cols[idx_name].strip():
                 name = cols[idx_name].replace('"', '').strip()
-                backup_map[asin]['title'] = name[:50] + "..." if len(name) > 50 else name
+                backup_map[asin]['title'] = name[:100] + "..." if len(name) > 100 else name
             if idx_price is not None and len(cols) > idx_price and cols[idx_price].strip():
                 try: backup_map[asin]['price'] = float(cols[idx_price].replace('"', '').replace(',', '').strip())
                 except: pass
@@ -191,29 +185,31 @@ def main():
         fba_stock_map = {}
         traffic_data = {}
         
-        print("🔄 Amazonに出品レポート(軽量版)を要求中...")
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 💡 【改修ポイント】在庫切れ（非アクティブ）を含めるため、全データ版を最優先にしました
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        print("🔄 Amazonに出品レポート(全データ版)を要求中...")
         try:
-            listings_tsv = request_and_download_report(token, "GET_MERCHANT_LISTINGS_DATA")
+            listings_tsv = request_and_download_report(token, "GET_MERCHANT_LISTINGS_ALL_DATA")
             parse_listings_tsv(listings_tsv, listings_map)
-            print("✅ 軽量版出品レポートからマスターデータを構築しました。")
+            print("✅ 全データ版出品レポートからマスターデータを構築しました。")
         except Exception as l_e:
-            print(f"⚠️ 軽量版制限のため全データ版で再トライします: {l_e}")
+            print(f"⚠️ 全データ版制限のためアクティブ出品レポートで再トライします: {l_e}")
             try:
-                listings_tsv = request_and_download_report(token, "GET_MERCHANT_LISTINGS_ALL_DATA")
+                listings_tsv = request_and_download_report(token, "GET_MERCHANT_LISTINGS_DATA")
                 parse_listings_tsv(listings_tsv, listings_map)
-                print("✅ 全データ版出品レポートからマスターデータを構築しました。")
+                print("✅ 軽量版(アクティブ)出品レポートからマスターデータを構築しました。")
             except Exception as l_e2:
                 print(f"⚠️ 出品レポートAPI制限。在庫データ側から復元します: {l_e2}")
         
         print("🔄 AmazonにFBA在庫レポートを要求中...")
-        # 💡 【改修】商品名が確実に含まれる「MYI版」を最優先で取得するよう順番を変更
         fba_reports = ["GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA", "GET_AFN_INVENTORY_DATA"]
         for report_type in fba_reports:
             try:
                 fba_tsv = request_and_download_report(token, report_type)
                 parse_fba_inventory(fba_tsv, fba_stock_map, listings_backup)
                 print(f"✅ FBA在庫レポート({report_type})の解析に成功しました。")
-                break  # 成功したら予備レポートの処理をスキップ
+                break
             except Exception as e:
                 print(f"⚠️ {report_type} をスキップします: {e}")
         
@@ -308,27 +304,42 @@ def main():
         requests.post(INVENTORY_GAS_URL, json=sheet_payload)
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # 👑 ランキングデータの生成処理（Discord用）
+        # 👑 ランキング＆アラートデータの生成処理（Discord用）
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        DISCORD_TITLE_LIMIT = 60 
+
+        # PVランキング Top5
         top_pv_items = sorted([x for x in sheet_payload if x['pv'] > 0], key=lambda x: x['pv'], reverse=True)[:5]
         pv_ranking_str = ""
         if not top_pv_items:
             pv_ranking_str = " └ 期間内のアクセスデータなし\n"
         else:
             for i, item in enumerate(top_pv_items, 1):
-                short_title = item['title'][:25] + "..." if len(item['title']) > 25 else item['title']
+                short_title = item['title'][:DISCORD_TITLE_LIMIT] + "..." if len(item['title']) > DISCORD_TITLE_LIMIT else item['title']
                 prefix = " └" if i == len(top_pv_items) else " ├"
                 pv_ranking_str += f"{prefix} {i}位: {item['pv']:,} PV ({short_title})\n"
 
+        # 販売数ランキング Top5
         top_sales_items = sorted([x for x in sheet_payload if x['sales_30d'] > 0], key=lambda x: x['sales_30d'], reverse=True)[:5]
         sales_ranking_str = ""
         if not top_sales_items:
             sales_ranking_str = " └ 期間内の販売実績なし\n"
         else:
             for i, item in enumerate(top_sales_items, 1):
-                short_title = item['title'][:25] + "..." if len(item['title']) > 25 else item['title']
+                short_title = item['title'][:DISCORD_TITLE_LIMIT] + "..." if len(item['title']) > DISCORD_TITLE_LIMIT else item['title']
                 prefix = " └" if i == len(top_sales_items) else " ├"
                 sales_ranking_str += f"{prefix} {i}位: {item['sales_30d']:,} 個 ({short_title})\n"
+
+        # 低在庫アラート
+        low_stock_items = sorted([x for x in sheet_payload if x['sales_30d'] > 0 and x['quantity'] <= 5], key=lambda x: x['sales_30d'], reverse=True)[:5]
+        low_stock_str = ""
+        if not low_stock_items:
+            low_stock_str = " └ 現在、該当する低在庫商品はありません\n"
+        else:
+            for i, item in enumerate(low_stock_items, 1):
+                short_title = item['title'][:DISCORD_TITLE_LIMIT] + "..." if len(item['title']) > DISCORD_TITLE_LIMIT else item['title']
+                prefix = " └" if i == len(low_stock_items) else " ├"
+                low_stock_str += f"{prefix} ⚠️ 残り{item['quantity']}個 (月間{item['sales_30d']}個販売): {short_title}\n"
 
         print("📢 独立したDiscordチャンネルへ総括サマリーを送信中...")
         report_date = datetime.datetime.now().strftime('%Y/%m/%d')
@@ -354,6 +365,9 @@ def main():
             f"-----------------------------------\n"
             f"👑 **【売れ筋】販売個数ランキング Top5**\n"
             f"{sales_ranking_str}"
+            f"-----------------------------------\n"
+            f"🚨 **【要補充】売れ筋・低在庫アラート (在庫5個以下)**\n"
+            f"{low_stock_str}"
             f"━━━━━━━━━━━━━━━━━━━\n"
         )
         
