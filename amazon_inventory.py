@@ -86,15 +86,17 @@ def request_and_download_report(token, report_type, extra_body=None):
     return content.decode('utf-8')
 
 def parse_listings_tsv(tsv_text, target_map):
-    """出品レポートのTSVを解析してマップに格納する（ヘッダーの揺れに対応）"""
+    """💡 【修正】日本語ヘッダー（商品名, 価格, 商品ID等）にも完全対応"""
     lines = tsv_text.strip().split('\n')
     if len(lines) <= 1:
         return
     headers = [h.strip().lower() for h in lines[0].split('\t')]
-    idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h), None)
-    idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h or 'product-id' in h), None)
-    idx_name = next((i for i, h in enumerate(headers) if 'name' in h or 'title' in h), None)
-    idx_price = next((i for i, h in enumerate(headers) if 'price' in h), None)
+    print(f"🔍 [デバッグ] 出品レポートの列名: {headers[:10]}...") # ログ確認用
+    
+    idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h or '出品者' in h), None)
+    idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h or 'product-id' in h or '商品id' in h), None)
+    idx_name = next((i for i, h in enumerate(headers) if 'name' in h or 'title' in h or '商品名' in h), None)
+    idx_price = next((i for i, h in enumerate(headers) if 'price' in h or '価格' in h), None)
     
     for line in lines[1:]:
         cols = line.split('\t')
@@ -112,16 +114,17 @@ def parse_listings_tsv(tsv_text, target_map):
                 target_map[asin] = {"sku": sku, "title": name, "price": price}
 
 def parse_fba_inventory(tsv_text, stock_map, backup_map):
-    """💡 【超強化】成功している在庫レポートから数量だけでなくSKU・商品名・価格も予備として全救済する"""
+    """💡 【修正】在庫レポートの日本語ヘッダー対応"""
     lines = tsv_text.strip().split('\n')
     if len(lines) <= 1:
         return
     headers = [h.strip().lower() for h in lines[0].split('\t')]
-    idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h), None)
-    idx_qty = next((i for i, h in enumerate(headers) if 'quantity' in h or 'qty' in h or 'fulfillable' in h), None)
-    idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h), None)
-    idx_name = next((i for i, h in enumerate(headers) if 'name' in h or 'title' in h), None)
-    idx_price = next((i for i, h in enumerate(headers) if 'price' in h), None)
+    
+    idx_asin = next((i for i, h in enumerate(headers) if 'asin' in h or '商品id' in h), None)
+    idx_qty = next((i for i, h in enumerate(headers) if 'quantity' in h or 'qty' in h or 'fulfillable' in h or '数量' in h or '販売可能' in h), None)
+    idx_sku = next((i for i, h in enumerate(headers) if 'sku' in h or '出品者' in h), None)
+    idx_name = next((i for i, h in enumerate(headers) if 'name' in h or 'title' in h or '商品名' in h), None)
+    idx_price = next((i for i, h in enumerate(headers) if 'price' in h or '価格' in h), None)
     
     if idx_asin is None or idx_qty is None:
         return
@@ -138,7 +141,6 @@ def parse_fba_inventory(tsv_text, stock_map, backup_map):
                 
                 if asin not in backup_map:
                     backup_map[asin] = {}
-                # 在庫レポート内にある文字情報をバックアップに回す
                 if idx_sku is not None and len(cols) > idx_sku and cols[idx_sku].strip():
                     backup_map[asin]['sku'] = cols[idx_sku].strip()
                 if idx_name is not None and len(cols) > idx_name and cols[idx_name].strip():
@@ -158,7 +160,7 @@ def main():
         fba_stock_map = {}
         traffic_data = {}
         
-        # 1. 出品レポートの取得（制限を回避するため軽量な無印版をファーストチョイスに）
+        # 1. 出品レポートの取得
         print("🔄 Amazonに出品レポート(軽量版)を要求中...")
         try:
             listings_tsv = request_and_download_report(token, "GET_MERCHANT_LISTINGS_DATA")
@@ -171,9 +173,9 @@ def main():
                 parse_listings_tsv(listings_tsv, listings_map)
                 print("✅ 全データ版出品レポートからマスターデータを構築しました。")
             except Exception as l_e2:
-                print(f"⚠️ 出品レポートAPIが完全に制限されました。在庫データ側から情報を復元します: {l_e2}")
+                print(f"⚠️ 出品レポートAPI制限。在庫データ側から復元します: {l_e2}")
         
-        # 2. FBA在庫レポートの取得（ここからSKU等も同時にバックアップ抽出）
+        # 2. FBA在庫レポートの取得
         print("🔄 AmazonにFBA在庫レポートを要求中...")
         try:
             fba_tsv = request_and_download_report(token, "GET_AFN_INVENTORY_DATA")
@@ -212,7 +214,7 @@ def main():
             asin = item.get("childAsin") or item.get("parentAsin") or item.get("asin")
             if not asin:
                 continue
-                
+            
             sales_stats = item.get("salesByAsin", {})
             traffic_stats = item.get("trafficByAsin", {})
             
@@ -225,7 +227,7 @@ def main():
                 "pv": pv, "sessions": sessions, "units_sold": units_sold, "revenue": revenue
             }
 
-        # 5. すべてのデータを高度マージ（出品マスター、在庫からの救済値、PV売上を合流）
+        # 5. すべてのデータを高度マージ
         all_asins = set(listings_map.keys()) | set(fba_stock_map.keys()) | set(traffic_map.keys())
         sheet_payload = []
         
@@ -241,8 +243,7 @@ def main():
             l_data = listings_map.get(asin, {})
             b_data = listings_backup.get(asin, {})
             
-            # 💡 公式マスターになければ、無事通っている在庫レポートのバックアップからSKU·商品名を救出する
-            sku = l_data.get("sku") or b_data.get("sku") or "SKU自動救済エラー"
+            sku = l_data.get("sku") or b_data.get("sku") or "自動取得エラー(出品停止等の可能性)"
             title = l_data.get("title") or b_data.get("title") or f"出品中商品 ({asin})"
             price = l_data.get("price") or b_data.get("price") or 0.0
             
@@ -253,11 +254,10 @@ def main():
             units_sold = t_data["units_sold"]
             revenue = t_data["revenue"]
             
-            # 💡 【価格逆算ロジック】出品API制限で現在の価格が0の場合、直近の売上データから確定販売単価を逆算して補完する
+            # 出品価格が取得できなかった場合、直近の売上から逆算
             if price == 0.0 and units_sold > 0 and revenue > 0:
                 price = revenue / units_sold
             
-            # 原価設定シートとの照合および粗利計算
             if asin in product_costs:
                 cost = float(product_costs[asin])
                 profit_30d = revenue - (units_sold * cost)
@@ -305,7 +305,6 @@ def main():
             f" ├ 💵 確定売上高: ￥{int(total_revenue_30d):,}\n"
             f" └ ✨ 期間内確定粗利: ￥{int(total_profit_30d):,}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"※API制限対策を適用し、各種レポートからデータを高度マージして出力しています。"
         )
         
         if DISCORD_WEBHOOK_SUMMARY:
