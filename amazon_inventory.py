@@ -123,7 +123,11 @@ def main():
         # 3. トラフィック・過去売上データをASINごとにマッピング
         traffic_map = {}
         for item in traffic_data.get("salesAndTrafficByAsin", []):
-            asin = item.get("asin")
+            # 💡 【大修正】Amazonビジネスレポートの仕様に合わせ、childAsin等のキーを網羅して取得します
+            asin = item.get("childAsin") or item.get("parentAsin") or item.get("asin")
+            if not asin:
+                continue
+                
             sales_stats = item.get("salesByAsin", {})
             traffic_stats = item.get("trafficByAsin", {})
             
@@ -252,7 +256,6 @@ def main():
         else:
             stock_status_str = " ⚠️ Amazon在庫データ取得不可（売上高·PVのみを集計中）"
         
-        # 🔗 【バグ修正】文字列の先頭にしっかりと f" を付与しました
         discord_msg = (
             f"📊 **【Amazon】店舗経営・在庫総括レポート ({report_date})**\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
